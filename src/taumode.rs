@@ -79,7 +79,7 @@ pub fn laplacian_chain_dense<B: Backend>(d: usize, device: &B::Device) -> Featur
 pub fn lambdas_from_heads<B: Backend>(
     x: Tensor<B, 4>,
     lap: &FeatureLaplacian<B>,
-    cfg: TauModeConfig,
+    cfg: &TauModeConfig,
 ) -> Tensor<B, 3> {
     let [b, h, t, d] = x.dims();
     debug_assert_eq!(d, lap.dim(), "x last dim D must match Laplacian");
@@ -149,7 +149,7 @@ pub fn mqa_expand_heads_4<B: Backend>(
 pub fn taumode_distance_logits<B: Backend>(
     lambda_q: Tensor<B, 3>,
     lambda_k: Tensor<B, 3>,
-    cfg: TauModeConfig,
+    cfg: &TauModeConfig,
 ) -> Tensor<B, 4> {
     let [bq, hq, tq] = lambda_q.dims();
     let [bk, hk, tk] = lambda_k.dims();
@@ -181,7 +181,7 @@ pub fn causal_softmax_over_keys<B: Backend>(
     let mask4 = mask2
         .unsqueeze_dims::<4>(&[0, 1])
         .expand([b, n_head, t_q, t_k]);
-    att = att.mask_fill(mask4.bool_not(), -1.0e9);
+    att = att.mask_fill(mask4, -1.0e9); // Fill upper-tri (where mask=true) with -1e9
 
     // 2) subtract row max (dim=3)
     let att_max = att.clone().max_dim(3).squeeze::<3>(3); // [B,H,Tq]

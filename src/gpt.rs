@@ -22,7 +22,7 @@ use crate::config::NanoChatConfig;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Functional RMSNorm (no learnable params), over last dimension
-fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, D> {
+pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, D> {
     let dims = x.dims();
     let last = dims.len() - 1;
 
@@ -88,7 +88,7 @@ fn precompute_rotary_embeddings<B: Backend>(
     (cos, sin)
 }
 
-fn apply_rotary_emb<B: Backend>(
+pub fn apply_rotary_emb<B: Backend>(
     x: Tensor<B, 4>,    // [B, H, T, D]
     cos: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2] - full global cache
     sin: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2]

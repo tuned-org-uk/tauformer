@@ -27,6 +27,7 @@ pub mod tokenizer;
 pub use checkpoint::{load_checkpoint, load_weights, save_checkpoint, save_weights};
 pub mod parquet;
 pub mod pretraining;
+pub mod tauattention;
 pub mod taumode;
 
 #[cfg(test)]
