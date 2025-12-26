@@ -1,4 +1,4 @@
-//! NanoChat GPT with numerically stable attention and logits
+//! NanoGPT with numerically stable attention and logits
 //!
 //! Key stability measures:
 //! - Stable attention softmax (max-subtraction + large-negative mask)
@@ -10,13 +10,12 @@
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::{activation, backend::Backend, Bool, Int, Tensor},
+    tensor::{Bool, Int, Tensor, activation, backend::Backend},
 };
 use log::{debug, info, trace};
 use std::path::Path;
 
 use crate::config::NanoChatConfig;
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RMS norm
@@ -38,7 +37,6 @@ fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, 
 
     x / rms_b
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RoPE
@@ -73,8 +71,8 @@ fn precompute_rotary_embeddings<B: Backend>(
         }
     }
 
-    let freqs = Tensor::<B, 1>::from_floats(freqs_data.as_slice(), device)
-        .reshape([seq_len, half_dim]);
+    let freqs =
+        Tensor::<B, 1>::from_floats(freqs_data.as_slice(), device).reshape([seq_len, half_dim]);
 
     let cos = freqs.clone().cos();
     let sin = freqs.sin();
@@ -91,23 +89,25 @@ fn precompute_rotary_embeddings<B: Backend>(
 }
 
 fn apply_rotary_emb<B: Backend>(
-    x: Tensor<B, 4>,           // [B, H, T, D]
-    cos: Tensor<B, 4>,         // [1, T, 1, D/2]
-    sin: Tensor<B, 4>,         // [1, T, 1, D/2]
+    x: Tensor<B, 4>,    // [B, H, T, D]
+    cos: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2] - full global cache
+    sin: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2]
 ) -> Tensor<B, 4> {
     let [b, h, t, d] = x.dims();
     let d_half = d / 2;
-    debug!("apply_rotary_emb: x shape [B={}, H={}, T={}, D={}]", b, h, t, d);
 
     let x1 = x.clone().slice([0..b, 0..h, 0..t, 0..d_half]);
     let x2 = x.slice([0..b, 0..h, 0..t, d_half..d]);
 
-    // Slice to current time, move time to axis 2, then expand
+    // Slice RoPE for positions [0..t] from global cache
     let cos = cos
-        .slice([0..1, 0..t, 0..1, 0..d_half])
-        .swap_dims(1, 2)
+        .clone()
+        .slice([0..1, 0..t, 0..1, 0..d_half]) // positions 0..t (absolute)
+        .swap_dims(1, 2) // [1, 1, t, d_half]
         .expand([b, h, t, d_half]);
+
     let sin = sin
+        .clone()
         .slice([0..1, 0..t, 0..1, 0..d_half])
         .swap_dims(1, 2)
         .expand([b, h, t, d_half]);
@@ -187,46 +187,83 @@ impl<B: Backend> CausalSelfAttention<B> {
 
     pub fn forward(
         &self,
-        x: Tensor<B, 3>,                         // [B, T, C]
+        x: Tensor<B, 3>, // [B, T, C]
         cos_sin: (&Tensor<B, 4>, &Tensor<B, 4>),
     ) -> Tensor<B, 3> {
         let [b, t, c] = x.dims();
-        debug!("Layer {} attn forward: input [B={}, T={}, C={}]", self.layer_idx, b, t, c);
+        debug!(
+            "Layer {} attn forward: input [B={}, T={}, C={}]",
+            self.layer_idx, b, t, c
+        );
 
         // Projections with clipping
-        let q = self
-            .c_q
-            .forward(x.clone())
-            .clamp(-5.0, 5.0)
-            .reshape([b, t, self.n_head, self.head_dim]);
-        let k = self
-            .c_k
-            .forward(x.clone())
-            .clamp(-5.0, 5.0)
-            .reshape([b, t, self.n_kv_head, self.head_dim]);
+        let q = self.c_q.forward(x.clone()).clamp(-5.0, 5.0).reshape([
+            b,
+            t,
+            self.n_head,
+            self.head_dim,
+        ]);
+        let k = self.c_k.forward(x.clone()).clamp(-5.0, 5.0).reshape([
+            b,
+            t,
+            self.n_kv_head,
+            self.head_dim,
+        ]);
         let v = self
             .c_v
             .forward(x)
             .clamp(-5.0, 5.0)
             .reshape([b, t, self.n_kv_head, self.head_dim]);
 
-        debug!("Layer {} QKV shapes: Q {:?}, K {:?}, V {:?}", 
-               self.layer_idx, q.dims(), k.dims(), v.dims());
+        debug!(
+            "Layer {} QKV shapes: Q {:?}, K {:?}, V {:?}",
+            self.layer_idx,
+            q.dims(),
+            k.dims(),
+            v.dims()
+        );
 
         // [B, H, T, D]
         let q = q.swap_dims(1, 2);
         let k = k.swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
 
-        // RoPE
+        // Apply RoPE (now slicing happens INSIDE apply_rotary_emb)
         let (cos, sin) = cos_sin;
-        let q = apply_rotary_emb(q, cos.clone(), sin.clone());
-        let k = apply_rotary_emb(k, cos.clone(), sin.clone());
-        debug!("Layer {} after RoPE: Q {:?}, K {:?}", self.layer_idx, q.dims(), k.dims());
+        let q = apply_rotary_emb(q, cos, sin); // cos/sin are full cache
+        let k = apply_rotary_emb(k, cos, sin);
+
+        // DEBUG: Extract position 2 from both Q and K before normalization
+        if t >= 3 {
+            let q_pos2 = q.clone().slice([0..1, 0..1, 2..3, 0..4]).reshape([4]);
+            let k_pos2 = k.clone().slice([0..1, 0..1, 2..3, 0..4]).reshape([4]);
+            let q_vec: Vec<f32> = q_pos2.to_data().to_vec().unwrap();
+            let k_vec: Vec<f32> = k_pos2.to_data().to_vec().unwrap();
+            debug!("Q[pos=2, head=0]: {:?}", q_vec);
+            debug!("K[pos=2, head=0]: {:?}", k_vec);
+        }
+
+        debug!(
+            "Layer {} after RoPE: Q {:?}, K {:?}",
+            self.layer_idx,
+            q.dims(),
+            k.dims()
+        );
 
         // QK-norm via LayerNorm over D
         let q = rms_norm(q, 1e-6);
         let k = rms_norm(k, 1e-6);
+
+        // DEBUG: Check Q/K after normalization
+        if t >= 3 {
+            let q_pos2_norm = q.clone().slice([0..1, 0..1, 2..3, 0..4]).reshape([4]);
+            let k_pos2_norm = k.clone().slice([0..1, 0..1, 2..3, 0..4]).reshape([4]);
+            let q_vec_norm: Vec<f32> = q_pos2_norm.to_data().to_vec().unwrap();
+            let k_vec_norm: Vec<f32> = k_pos2_norm.to_data().to_vec().unwrap();
+            debug!("Q_NORM[pos=2, head=0]: {:?}", q_vec_norm);
+            debug!("K_NORM[pos=2, head=0]: {:?}", k_vec_norm);
+        }
+
         debug!("Layer {} after RMS-norm", self.layer_idx);
 
         // Attention
@@ -302,36 +339,48 @@ impl<B: Backend> CausalSelfAttention<B> {
 
         // 1) Apply causal mask FIRST with large negative
         let mask2: Tensor<B, 2, Bool> = Tensor::tril_mask([t_q, t_k], 0, &att.device());
+
+        // Burn's tril_mask returns FALSE for lower-tri (allowed), TRUE for upper-tri (blocked)
+        // mask_fill replaces where mask is TRUE, so we want upper-tri to be TRUE
+        // Therefore: use mask2 DIRECTLY (no bool_not)
         let mask4 = mask2
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.n_head, t_q, t_k]);
-        att = att.mask_fill(mask4.bool_not(), -1.0e9);
-        trace!("Attn(L{}): mask applied (causal)", self.layer_idx);
+
+        att = att.mask_fill(mask4, -1.0e9); // Fill upper-tri (where mask=true) with -1e9
+        trace!("Attn(L{}): causal mask applied", self.layer_idx);
 
         // 2) Subtract per-row max along keys axis (dimension 3)
         let att_max = att.clone().max_dim(3).squeeze::<3>(3); // [B, H, Tq]
         att = att - att_max.unsqueeze_dim::<4>(3); // [B, H, Tq, Tk]
-        trace!("Attn(L{}): stabilized by row max subtraction", self.layer_idx);
+        trace!(
+            "Attn(L{}): stabilized by row max subtraction",
+            self.layer_idx
+        );
 
         // 3) Softmax over keys axis
         let att = activation::softmax(att, 3);
+
+        // DEBUG: Check attention weights for position 2
+        if t_q >= 3 {
+            let att_pos2 = att.clone().slice([0..1, 0..1, 2..3, 0..t_k]).reshape([t_k]);
+            let att_vec: Vec<f32> = att_pos2.to_data().to_vec().unwrap();
+            debug!("ATT_WEIGHTS[pos=2, head=0]: {:?}", att_vec);
+        }
+
         trace!("Attn(L{}): softmax done on axis=3", self.layer_idx);
 
         // 4) Weighted sum
         let out = att.matmul(v); // [B, H, Tq, D]
-        debug!(
-            "Attn(L{}): output shape {:?}",
-            self.layer_idx,
-            out.dims()
-        );
+        debug!("Attn(L{}): output shape {:?}", self.layer_idx, out.dims());
         out
     }
 
     // Decode-time forward: Tq = 1, appends K/V to cache for this layer and attends to full past.
     pub fn forward_decode(
         &self,
-        x_step: Tensor<B, 3>,                         // [B, 1, C]
-        cos_sin_step: (&Tensor<B, 4>, &Tensor<B, 4>), // [1,1,1,D/2]
+        x_step: Tensor<B, 3>,                                   // [B, 1, C]
+        cos_sin_step: (&Tensor<B, 4>, &Tensor<B, 4>),           // [1,1,1,D/2]
         cache_layer: &mut Option<(Tensor<B, 4>, Tensor<B, 4>)>, // K/V store for this layer
     ) -> Tensor<B, 3> {
         let [b, tq, c] = x_step.dims();
@@ -447,7 +496,7 @@ impl<B: Backend> Mlp<B> {
     pub fn new(cfg: &NanoChatConfig, device: &B::Device) -> Self {
         let n = cfg.n_embd;
         debug!("MLP init: n_embd={}, hidden=4*n_embd={}", n, 4 * n);
-        
+
         let init = burn::nn::Initializer::KaimingUniform {
             gain: 0.5,
             fan_out_only: false,
@@ -497,9 +546,8 @@ impl<B: Backend> Block<B> {
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
-        cos_sin: (&Tensor<B, 4>, &Tensor<B, 4>),
+        cos_sin: (&Tensor<B, 4>, &Tensor<B, 4>), // references now
     ) -> Tensor<B, 3> {
-        // Pre-norm via RMSNorm instead of LayerNorm (ln1 is retained but unused)
         let x = x.clone() + self.attn.forward(rms_norm(x.clone(), 1e-6), cos_sin);
         x.clone() + self.mlp.forward(rms_norm(x, 1e-6))
     }
@@ -510,11 +558,10 @@ impl<B: Backend> Block<B> {
         cos_sin_step: (&Tensor<B, 4>, &Tensor<B, 4>), // [1,1,1,D/2]
         cache_layer: &mut Option<(Tensor<B, 4>, Tensor<B, 4>)>,
     ) -> Tensor<B, 3> {
-        let x = x_step.clone() + self.attn.forward_decode(
-            rms_norm(x_step.clone(), 1e-6),
-            cos_sin_step,
-            cache_layer,
-        );
+        let x = x_step.clone()
+            + self
+                .attn
+                .forward_decode(rms_norm(x_step.clone(), 1e-6), cos_sin_step, cache_layer);
         x.clone() + self.mlp.forward(rms_norm(x, 1e-6))
     }
 }
@@ -547,16 +594,17 @@ impl<B: Backend> GptModel<B> {
         info!("═══════════════════════════════════════");
 
         let head_dim = cfg.n_embd / cfg.n_head;
-        let (cos, sin) = precompute_rotary_embeddings(cfg.sequence_len * 10, head_dim, 10000.0, device);
+        let (cos, sin) =
+            precompute_rotary_embeddings(cfg.sequence_len * 10, head_dim, 10000.0, device);
 
         info!("Creating embedding layer");
         let wte = EmbeddingConfig::new(cfg.vocab_size, cfg.n_embd).init(device);
-        
+
         info!("Creating {} transformer blocks", cfg.n_layer);
         let blocks = (0..cfg.n_layer)
             .map(|i| Block::new(cfg, i, device))
             .collect();
-        
+
         info!("Creating final LayerNorm and lm_head");
         let ln_f = LayerNormConfig::new(cfg.n_embd).init(device);
         let lm_head = LinearConfig::new(cfg.n_embd, cfg.vocab_size)
@@ -584,18 +632,20 @@ impl<B: Backend> GptModel<B> {
         assert!(t > 0, "Sequence length must be > 0");
         debug!("GptModel.forward: input [B={}, T={}]", b, t);
 
-        let head_dim = self.cos.dims()[3];
-        let cos_slice = self.cos.clone().slice([0..1, 0..t, 0..1, 0..head_dim]);
-        let sin_slice = self.sin.clone().slice([0..1, 0..t, 0..1, 0..head_dim]);
-        debug!("RoPE slices: cos {:?}, sin {:?}", cos_slice.dims(), sin_slice.dims());
+        // DON'T slice - pass full cache
+        debug!(
+            "RoPE cache (full): cos {:?}, sin {:?}",
+            self.cos.dims(),
+            self.sin.dims()
+        );
 
         // Embed
         let mut x = self.wte.forward(idx);
         debug!("After embedding: shape {:?}", x.dims());
 
-        // Blocks
+        // Blocks (pass full cache as references)
         for (i, block) in self.blocks.iter().enumerate() {
-            x = block.forward(x, (&cos_slice, &sin_slice));
+            x = block.forward(x, (&self.cos, &self.sin));
             debug!("After block {}: shape {:?}", i, x.dims());
         }
 
@@ -614,7 +664,11 @@ impl<B: Backend> GptModel<B> {
         if use_softcap {
             let softcap = 15.0;
             debug!("Applying softcap={}", softcap);
-            logits = logits.clone().div_scalar(softcap).tanh().mul_scalar(softcap);
+            logits = logits
+                .clone()
+                .div_scalar(softcap)
+                .tanh()
+                .mul_scalar(softcap);
         }
 
         // Final clamp
@@ -626,20 +680,20 @@ impl<B: Backend> GptModel<B> {
     pub fn generate(&self, mut idx: Tensor<B, 2, Int>, max_new_tokens: usize) -> Tensor<B, 2, Int> {
         let [_b, t0] = idx.dims();
         info!("Generation: initial_len={}, max_new={}", t0, max_new_tokens);
-        
+
         for step in 0..max_new_tokens {
             let logits = self.forward(idx.clone(), true);
             let [b, t, v] = logits.dims();
-            
+
             if step % 5 == 0 {
                 debug!("Generation step {}: seq_len={}", step, t);
             }
-            
+
             let last = logits.slice([0..b, (t - 1)..t, 0..v]).reshape([b, v]);
             let next = last.argmax(1).reshape([b, 1]);
             idx = Tensor::cat(vec![idx, next], 1);
         }
-        
+
         info!("Generation complete: final_len={}", idx.dims()[1]);
         idx
     }
@@ -661,7 +715,7 @@ impl<B: Backend> GptModel<B> {
         is_healthy
     }
 
-        // Number of blocks (for KVCache sizing)
+    // Number of blocks (for KVCache sizing)
     pub fn num_layers(&self) -> usize {
         self.blocks.len()
     }
@@ -708,7 +762,11 @@ impl<B: Backend> GptModel<B> {
         logits = logits.clamp(-50.0, 50.0);
         if use_softcap {
             let softcap = 15.0;
-            logits = logits.clone().div_scalar(softcap).tanh().mul_scalar(softcap);
+            logits = logits
+                .clone()
+                .div_scalar(softcap)
+                .tanh()
+                .mul_scalar(softcap);
         }
         logits = logits.clamp(-50.0, 50.0);
 
