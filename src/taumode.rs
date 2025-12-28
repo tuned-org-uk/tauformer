@@ -173,11 +173,13 @@ pub fn causal_softmax_over_keys<B: Backend>(
     t_k: usize,
     n_head: usize,
 ) -> Tensor<B, 4> {
-    let [b, h, _tq, _tk] = att.dims();
+    let [b, h, tq, tk] = att.dims();
     debug_assert_eq!(h, n_head);
 
     // 1) causal mask (lower-triangular)
-    let mask2: Tensor<B, 2, Bool> = Tensor::tril_mask([t_q, t_k], 0, &att.device());
+    let diag = (tk as i64) - (tq as i64);
+    let mask2: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
+
     let mask4 = mask2
         .unsqueeze_dims::<4>(&[0, 1])
         .expand([b, n_head, t_q, t_k]);

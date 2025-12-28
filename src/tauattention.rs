@@ -10,7 +10,8 @@ use burn::{
 use log::{debug, info, trace};
 
 use crate::config::NanoChatConfig;
-use crate::gpt::{apply_rotary_emb, rms_norm};
+use crate::gpt::rms_norm;
+use crate::rope::{apply_rotary_emb, apply_rotary_emb_step};
 use crate::taumode::{
     FeatureLaplacian, TauModeConfig, lambdas_from_heads, mqa_expand_heads_4,
     taumode_distance_logits,
@@ -22,10 +23,10 @@ pub type TauCacheLayer<B> = Option<(Tensor<B, 4>, Tensor<B, 3>)>;
 /// Tau-mode attention module.
 #[derive(Module, Debug)]
 pub struct TauModeAttention<B: Backend> {
-    layer_idx: usize,
-    nhead: usize,
-    nkv_head: usize,
-    head_dim: usize,
+    pub(crate) layer_idx: usize,
+    pub(crate) nhead: usize,
+    pub(crate) nkv_head: usize,
+    pub(crate) head_dim: usize,
 
     // Projections
     c_q: Linear<B>,
@@ -41,9 +42,9 @@ pub struct TauModeAttention<B: Backend> {
     laplacian_matrix: Param<Tensor<B, 2>>,
 
     // Store tau config as plain fields (not Module members)
-    tau: f32,
-    eps: f32,
-    temperature: f32,
+    pub(crate) tau: f32,
+    pub(crate) eps: f32,
+    pub(crate) temperature: f32,
 }
 
 impl<B: Backend> TauModeAttention<B> {
@@ -114,19 +115,26 @@ impl<B: Backend> TauModeAttention<B> {
     }
 
     // Helper to reconstruct FeatureLaplacian on the fly
-    fn get_laplacian(&self) -> FeatureLaplacian<B> {
+    pub fn get_laplacian(&self) -> FeatureLaplacian<B> {
         FeatureLaplacian {
             matrix: self.laplacian_matrix.val(),
         }
     }
 
     // Helper to reconstruct TauModeConfig on the fly
-    fn get_tau_config(&self) -> TauModeConfig {
+    pub fn get_tau_config(&self) -> TauModeConfig {
         TauModeConfig {
             tau: self.tau,
             eps: self.eps,
             temperature: self.temperature,
         }
+    }
+
+    fn norm_heads(&self, x: Tensor<B, 4>, ln: &LayerNorm<B>) -> Tensor<B, 4> {
+        let [b, h, t, d] = x.dims();
+        let xflat = x.reshape([b * h * t, d]);
+        let out = ln.forward(xflat);
+        out.reshape([b, h, t, d])
     }
 
     /// Forward pass (training/prefill): full sequence.
@@ -193,7 +201,7 @@ impl<B: Backend> TauModeAttention<B> {
     pub fn forward_decode(
         &self,
         x_step: Tensor<B, 3>,
-        cos_sin_step: (&Tensor<B, 4>, &Tensor<B, 4>),
+        cos_sin_step: (&Tensor<B, 4>, &Tensor<B, 4>), // [1,1,1,D/2]
         cache_layer: &mut TauCacheLayer<B>,
     ) -> Tensor<B, 3> {
         let [b, tq, c] = x_step.dims();
@@ -205,41 +213,41 @@ impl<B: Backend> TauModeAttention<B> {
             .forward(x_step.clone())
             .clamp(-5.0, 5.0)
             .reshape([b, 1, self.nhead, self.head_dim])
-            .swap_dims(1, 2);
+            .swap_dims(1, 2); // [B, Hq, 1, D]
 
         let k_new = self
             .c_k
             .forward(x_step.clone())
             .clamp(-5.0, 5.0)
             .reshape([b, 1, self.nkv_head, self.head_dim])
-            .swap_dims(1, 2);
+            .swap_dims(1, 2); // [B, Hkv, 1, D]
 
         let v_new = self
             .c_v
             .forward(x_step)
             .clamp(-5.0, 5.0)
             .reshape([b, 1, self.nkv_head, self.head_dim])
-            .swap_dims(1, 2);
+            .swap_dims(1, 2); // [B, Hkv, 1, D]
 
-        // Apply RoPE
+        // Apply RoPE for *this* absolute position (stepwise)
         let (cos_step, sin_step) = cos_sin_step;
-        let q = apply_rotary_emb(q, cos_step, sin_step);
-        let k_new = apply_rotary_emb(k_new, cos_step, sin_step);
+        let q = apply_rotary_emb_step(q, cos_step, sin_step);
+        let k_new = apply_rotary_emb_step(k_new, cos_step, sin_step);
 
-        // QK norm
+        // QK norm (must match forward path)
         let q = rms_norm(q, 1e-6);
         let k_new = rms_norm(k_new, 1e-6);
 
         // Compute lambda_k for this step
         let laplacian = self.get_laplacian();
         let tau_config = self.get_tau_config();
-        let lambda_k_new = lambdas_from_heads(k_new, &laplacian, &tau_config);
+        let lambda_k_new = lambdas_from_heads(k_new, &laplacian, &tau_config); // [B, Hkv, 1]
 
         // Cache management
         let (v_full, lambda_k_full) = match cache_layer.take() {
             Some((v_all, lk_all)) => (
-                Tensor::cat(vec![v_all, v_new.clone()], 2),
-                Tensor::cat(vec![lk_all, lambda_k_new.clone()], 2),
+                Tensor::cat(vec![v_all, v_new.clone()], 2), // time axis
+                Tensor::cat(vec![lk_all, lambda_k_new.clone()], 2), // time axis
             ),
             None => (v_new.clone(), lambda_k_new.clone()),
         };
@@ -283,7 +291,12 @@ impl<B: Backend> TauModeAttention<B> {
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);
 
         // Causal mask
-        let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], 0, &att.device());
+        // Align queries to the end of the key cache:
+        // - forward: tq == tk => diag = 0
+        // - decode style: tq == 1, tk == T => diag = T - 1
+        let diag = (tk as i64) - (tq as i64);
+        let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
+
         let mask_4d = mask_2d
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.nhead, tq, tk]);
@@ -327,7 +340,9 @@ impl<B: Backend> TauModeAttention<B> {
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);
 
         // Causal mask + stable softmax
-        let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], 0, &att.device());
+        let diag = (tk as i64) - (tq as i64);
+        let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
+
         let mask_4d = mask_2d
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.nhead, tq, tk]);

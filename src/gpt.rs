@@ -16,6 +16,7 @@ use log::{debug, info, trace};
 use std::path::Path;
 
 use crate::config::NanoChatConfig;
+use crate::rope::{apply_rotary_emb, apply_rotary_emb_step, precompute_rotary_embeddings};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RMS norm
@@ -36,86 +37,6 @@ pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor
     let rms_b = rms.reshape(bshape).expand(dims);
 
     x / rms_b
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// RoPE
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn precompute_rotary_embeddings<B: Backend>(
-    seq_len: usize,
-    head_dim: usize,
-    base: f32,
-    device: &B::Device,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
-    info!(
-        "Precomputing RoPE: seq_len={}, head_dim={}, base={}",
-        seq_len, head_dim, base
-    );
-
-    let channel_range: Vec<f32> = (0..head_dim).step_by(2).map(|i| i as f32).collect();
-    let half_dim = channel_range.len();
-    debug!("RoPE half_dim={}", half_dim);
-
-    let inv_freq: Vec<f32> = channel_range
-        .iter()
-        .map(|&c| 1.0 / base.powf(c / head_dim as f32))
-        .collect();
-
-    let t: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-
-    let mut freqs_data = Vec::with_capacity(seq_len * half_dim);
-    for &time in &t {
-        for &freq in &inv_freq {
-            freqs_data.push(time * freq);
-        }
-    }
-
-    let freqs =
-        Tensor::<B, 1>::from_floats(freqs_data.as_slice(), device).reshape([seq_len, half_dim]);
-
-    let cos = freqs.clone().cos();
-    let sin = freqs.sin();
-
-    // [1, seq_len, 1, D/2]
-    let cos: Tensor<B, 3> = cos.unsqueeze_dim::<3>(0);
-    let cos: Tensor<B, 4> = cos.unsqueeze_dim::<4>(2);
-
-    let sin: Tensor<B, 3> = sin.unsqueeze_dim::<3>(0);
-    let sin: Tensor<B, 4> = sin.unsqueeze_dim::<4>(2);
-
-    debug!("RoPE cos/sin shape: {:?}", cos.dims());
-    (cos, sin)
-}
-
-pub fn apply_rotary_emb<B: Backend>(
-    x: Tensor<B, 4>,    // [B, H, T, D]
-    cos: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2] - full global cache
-    sin: &Tensor<B, 4>, // [1, MAX_SEQ, 1, D/2]
-) -> Tensor<B, 4> {
-    let [b, h, t, d] = x.dims();
-    let d_half = d / 2;
-
-    let x1 = x.clone().slice([0..b, 0..h, 0..t, 0..d_half]);
-    let x2 = x.slice([0..b, 0..h, 0..t, d_half..d]);
-
-    // Slice RoPE for positions [0..t] from global cache
-    let cos = cos
-        .clone()
-        .slice([0..1, 0..t, 0..1, 0..d_half]) // positions 0..t (absolute)
-        .swap_dims(1, 2) // [1, 1, t, d_half]
-        .expand([b, h, t, d_half]);
-
-    let sin = sin
-        .clone()
-        .slice([0..1, 0..t, 0..1, 0..d_half])
-        .swap_dims(1, 2)
-        .expand([b, h, t, d_half]);
-
-    let y1 = x1.clone() * cos.clone() + x2.clone() * sin.clone();
-    let y2 = x2 * cos - x1 * sin;
-
-    Tensor::cat(vec![y1, y2], 3)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +187,11 @@ impl<B: Backend> CausalSelfAttention<B> {
 
         debug!("Layer {} after RMS-norm", self.layer_idx);
 
+        let q = self.norm_heads(q, &self.qk_norm_q);
+        let k = self.norm_heads(k, &self.qk_norm_k);
+
+        debug!("Layer {} after norm_heads", self.layer_idx);
+
         // Attention
         let y = self.scaled_dot_product_attention(q, k, v, t, t);
         debug!("Layer {} attention output: {:?}", self.layer_idx, y.dims());
@@ -277,8 +203,8 @@ impl<B: Backend> CausalSelfAttention<B> {
 
     fn norm_heads(&self, x: Tensor<B, 4>, ln: &LayerNorm<B>) -> Tensor<B, 4> {
         let [b, h, t, d] = x.dims();
-        let x_flat = x.reshape([b * h * t, d]);
-        let out = ln.forward(x_flat);
+        let xflat = x.reshape([b * h * t, d]);
+        let out = ln.forward(xflat);
         out.reshape([b, h, t, d])
     }
 
@@ -338,7 +264,11 @@ impl<B: Backend> CausalSelfAttention<B> {
         trace!("Attn(L{}): raw att {:?}", self.layer_idx, att.dims());
 
         // 1) Apply causal mask FIRST with large negative
-        let mask2: Tensor<B, 2, Bool> = Tensor::tril_mask([t_q, t_k], 0, &att.device());
+        // Align queries to the end of the key cache:
+        // - forward: t_q == t_k => diag = 0 (standard causal mask)
+        // - decode:  t_q == 1,  t_k == T => diag = T-1 (allow all past keys)
+        let diag = (t_k as i64) - (t_q as i64);
+        let mask2: Tensor<B, 2, Bool> = Tensor::tril_mask([t_q, t_k], diag, &att.device());
 
         // Burn's tril_mask returns FALSE for lower-tri (allowed), TRUE for upper-tri (blocked)
         // mask_fill replaces where mask is TRUE, so we want upper-tri to be TRUE
@@ -428,10 +358,15 @@ impl<B: Backend> CausalSelfAttention<B> {
             cos_step.dims(),
             sin_step.dims()
         );
+
+        // Apply RoPE to Q and K_new at this absolute position
+        let q = apply_rotary_emb_step(q, cos_step, sin_step);
+        let k_new = apply_rotary_emb_step(k_new, cos_step, sin_step);
+
+        // Then normalize (same as forward)
         let q = rms_norm(q, 1e-6);
         let k_new = rms_norm(k_new, 1e-6);
 
-        // QK norm via LayerNorm over D
         let q = self.norm_heads(q, &self.qk_norm_q);
         let k_new = self.norm_heads(k_new, &self.qk_norm_k);
         debug!("Layer {} decode: after QK-norm", self.layer_idx);
