@@ -165,6 +165,7 @@ impl<B: Backend> TauGptModel<B> {
         info!("Initializing TauGptModel (sparse laplacian)");
 
         let head_dim = cfg.n_embd / cfg.n_head;
+        assert!(laplacian.rows() == head_dim);
         assert!(
             laplacian.rows() == laplacian.cols(),
             "Manifold Laplacian must be square, got {}x{}",

@@ -13,8 +13,8 @@ use crate::config::NanoChatConfig;
 use crate::gpt::rms_norm;
 use crate::rope::{apply_rotary_emb, apply_rotary_emb_step};
 use crate::taumode::{
-    FeatureLaplacian, TauModeConfig, lambdas_from_heads, mqa_expand_heads_4,
-    taumode_distance_logits,
+    FeatureLaplacian, TauModeConfig, lambdas_from_heads, lambdas_from_heads_sparse,
+    mqa_expand_heads_4, taumode_distance_logits,
 };
 use sprs::CsMat;
 use std::sync::Arc;
@@ -156,13 +156,6 @@ impl<B: Backend> TauModeAttention<B> {
         this
     }
 
-    fn set_dense_laplacian(mut self, laplacian_dd: Tensor<B, 2>) -> Self {
-        self.laplacian_matrix = Param::from_tensor(laplacian_dd).set_require_grad(false);
-        self.sparse_laplacian = Ignored(None);
-        self.manifold_tau_mode = Ignored(None);
-        self
-    }
-
     // Helper to reconstruct FeatureLaplacian on the fly
     pub fn get_laplacian(&self) -> FeatureLaplacian<B> {
         FeatureLaplacian {
@@ -176,6 +169,22 @@ impl<B: Backend> TauModeAttention<B> {
             tau: self.tau,
             eps: self.eps,
             temperature: self.temperature,
+        }
+    }
+
+    fn lambdas_from_heads_any(&self, heads: Tensor<B, 4>) -> Tensor<B, 3> {
+        let tau_cfg = self.get_tau_config();
+
+        if let Some(lap) = self.sparse_laplacian.0.as_ref() {
+            let mode = self
+                .manifold_tau_mode
+                .0
+                .unwrap_or(crate::pretraining::parquet::TauMode::Median);
+
+            crate::taumode::lambdas_from_heads_sparse::<B>(heads, lap.as_ref(), mode, tau_cfg.eps)
+        } else {
+            let laplacian = self.get_laplacian();
+            crate::taumode::lambdas_from_heads::<B>(heads, &laplacian, &tau_cfg)
         }
     }
 
@@ -281,9 +290,7 @@ impl<B: Backend> TauModeAttention<B> {
         let k_new = rms_norm(k_new, 1e-6);
 
         // Compute lambda_k for this step
-        let laplacian = self.get_laplacian();
-        let tau_config = self.get_tau_config();
-        let lambda_k_new = lambdas_from_heads(k_new, &laplacian, &tau_config); // [B, Hkv, 1]
+        let lambda_k_new = self.lambdas_from_heads_any(k_new); // [B, Hkv, 1]
 
         // Cache management
         let (v_full, lambda_k_full) = match cache_layer.take() {
@@ -313,32 +320,32 @@ impl<B: Backend> TauModeAttention<B> {
     ) -> Tensor<B, 4> {
         let [b, _hq, _, _d] = q.dims();
 
-        // MQA expansion
-        let (k, v) = if self.nhead != self.nkv_head {
-            (
-                mqa_expand_heads_4(k, self.nhead, self.nkv_head),
-                mqa_expand_heads_4(v, self.nhead, self.nkv_head),
-            )
+        // Expand only V for the weighted sum (MQA); keep K unexpanded for lambda_k.
+        let v = if self.nhead != self.nkv_head {
+            mqa_expand_heads_4(v, self.nhead, self.nkv_head)
         } else {
-            (k, v)
+            v
         };
 
-        // Compute lambda scalars
-        let laplacian = self.get_laplacian();
         let tau_config = self.get_tau_config();
-        let lambda_q = lambdas_from_heads(q, &laplacian, &tau_config);
-        let lambda_k = lambdas_from_heads(k, &laplacian, &tau_config);
+
+        // Compute lambda scalars using the unified policy (prefer sparse if present).
+        let lambda_q = self.lambdas_from_heads_any(q); // [B, Hq, Tq,] -> [B, Hq, Tq]
+        let lambda_k = self.lambdas_from_heads_any(k); // [B, Hkv, Tk,] -> [B, Hkv, Tk]
+
+        // If MQA: expand lambda_k (not K) to match nhead.
+        let lambda_k = if self.nhead != self.nkv_head {
+            crate::taumode::mqa_expand_heads_3(lambda_k, self.nhead, self.nkv_head)
+        } else {
+            lambda_k
+        };
 
         // Build attention logits
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);
 
         // Causal mask
-        // Align queries to the end of the key cache:
-        // - forward: tq == tk => diag = 0
-        // - decode style: tq == 1, tk == T => diag = T - 1
         let diag = (tk as i64) - (tq as i64);
         let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
-
         let mask_4d = mask_2d
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.nhead, tq, tk]);
@@ -363,7 +370,7 @@ impl<B: Backend> TauModeAttention<B> {
     ) -> Tensor<B, 4> {
         let [b, _hq, _, _d] = q.dims();
 
-        // MQA expansion
+        // MQA expansion (decode path receives lambda_k already computed/cached at Hkv)
         let (lambda_k, v) = if self.nhead != self.nkv_head {
             (
                 crate::taumode::mqa_expand_heads_3(lambda_k, self.nhead, self.nkv_head),
@@ -373,10 +380,9 @@ impl<B: Backend> TauModeAttention<B> {
             (lambda_k, v)
         };
 
-        // Compute lambda_q
-        let laplacian = self.get_laplacian();
+        // Compute lambda_q via the unified helper (prefer sparse if present)
         let tau_config = self.get_tau_config();
-        let lambda_q = lambdas_from_heads(q, &laplacian, &tau_config);
+        let lambda_q = self.lambdas_from_heads_any(q);
 
         // Build attention logits
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);

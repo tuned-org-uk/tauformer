@@ -226,40 +226,96 @@ fn rayleigh_csr_f32(l: &CsMat<f64>, x: &[f32]) -> f32 {
     }
 }
 
-/// Compute bounded taumode energy for attention heads using sparse CSR Laplacian.
-/// Input: `heads` shape [B, H, T, D]
-/// Output: lambdas shape [B, H, T]
+use crate::pretraining::parquet::TauMode as ManifoldTauMode;
+
+const TAU_FLOOR: f64 = 1e-10;
+
+fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f64 {
+    let mut v: Vec<f64> = x
+        .iter()
+        .copied()
+        .map(|a| a as f64)
+        .filter(|a| a.is_finite())
+        .collect();
+    if v.is_empty() {
+        return TAU_FLOOR;
+    }
+
+    match mode {
+        ManifoldTauMode::Median => {
+            v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = if v.len() % 2 == 1 {
+                v[v.len() / 2]
+            } else {
+                0.5 * (v[v.len() / 2 - 1] + v[v.len() / 2])
+            };
+            mid.max(TAU_FLOOR)
+        }
+        ManifoldTauMode::Mean => {
+            let sum: f64 = v.iter().sum();
+            (sum / (v.len() as f64)).max(TAU_FLOOR)
+        }
+        // If you later support these in your JSON/enum, extend here.
+        _ => TAU_FLOOR,
+    }
+}
+
+// Bounded Rayleigh quotient using CSR: E_raw = (x^T L x) / (x^T x + eps), then E/(E+tau).
+fn taumode_bounded_csr(x: &[f32], l: &CsMat<f64>, tau: f64, eps: f64) -> f32 {
+    debug_assert_eq!(l.rows(), l.cols());
+    debug_assert_eq!(l.rows(), x.len());
+
+    // numerator = x^T L x
+    let mut numerator = 0.0f64;
+    for (i, row) in l.outer_iterator().enumerate() {
+        let xi = x[i] as f64;
+        let mut row_dot = 0.0f64;
+        for (j, lij) in row.iter() {
+            row_dot += lij * (x[j] as f64);
+        }
+        numerator += xi * row_dot;
+    }
+
+    // denom = x^T x + eps
+    let mut denom = eps;
+    for &xi in x {
+        let v = xi as f64;
+        denom += v * v;
+    }
+
+    let e_raw = if denom > eps {
+        (numerator / denom).max(0.0)
+    } else {
+        0.0
+    };
+    let tau = tau.max(eps);
+    (e_raw / (e_raw + tau)) as f32
+}
+
+/// CPU-parallel sparse lambdas from heads.
+/// heads: [B,H,T,D] -> [B,H,T]
 pub fn lambdas_from_heads_sparse<B: Backend>(
     heads: Tensor<B, 4>,
-    laplacian: &CsMat<f64>, // D×D, CSR
-    tau: f32,
+    laplacian: &CsMat<f64>,
+    tau_mode: ManifoldTauMode,
+    eps: f32,
 ) -> Tensor<B, 3> {
     let [b, h, t, d] = heads.dims();
-    assert_eq!(laplacian.rows(), d, "L rows must match head_dim");
-    assert_eq!(laplacian.cols(), d, "L cols must match head_dim");
+    assert_eq!(laplacian.rows(), d);
+    assert_eq!(laplacian.cols(), d);
 
-    // CPU-bound path: download to host.
-    // This matches the “not GPU bound for now” requirement. [file:27]
-    let data: Vec<f32> = heads.to_data().to_vec().expect("heads to f32 vec");
-
+    // Download once; compute lambdas on CPU in parallel; upload result back to device.
+    let host: Vec<f32> = heads.to_data().to_vec().expect("heads must be f32");
     let n = b * h * t;
-    let mut out = vec![0.0f32; n];
 
-    // Each vector is contiguous in the last dimension D.
+    let eps64 = (eps as f64).max(1e-12);
+
+    let mut out = vec![0.0f32; n];
     out.par_iter_mut().enumerate().for_each(|(idx, dst)| {
         let start = idx * d;
-        let x = &data[start..start + d];
-
-        let e_raw = rayleigh_csr_f32(laplacian, x);
-
-        // ArrowSpace’s bounded transformation: E_bounded = E_raw / (E_raw + tau). [file:27]
-        let e_bounded = if e_raw > 0.0 {
-            e_raw / (e_raw + tau)
-        } else {
-            0.0
-        };
-
-        *dst = e_bounded;
+        let x = &host[start..start + d];
+        let tau = select_tau_from_vector(x, tau_mode);
+        *dst = taumode_bounded_csr(x, laplacian, tau, eps64);
     });
 
     Tensor::<B, 1>::from_floats(out.as_slice(), &heads.device()).reshape([b, h, t])
