@@ -81,7 +81,7 @@ let out = att.matmul(v); // [B,H,Tq,D]
 
 ***
 
-## Tauformer’s tau-mode attention
+## Tauformer’s taumode attention
 
 Tauformer keeps the same outer structure (Q/K/V, RoPE, MQA, causal softmax) but **replaces the QK dot-product kernel** with a **λ-distance kernel** built from a graph Laplacian.
 
@@ -115,7 +115,7 @@ pub fn laplacian_chain_dense<B: Backend>(
 }
 ```
 
-- Tau-mode config (τ, ε and temperature):
+- taumode config (τ, ε and temperature):
 
 ```rust
 #[derive(Clone, Copy, Debug)]
@@ -137,7 +137,7 @@ impl Default for TauModeConfig {
 ```
 
 
-For a head vector $x\in\mathbb{R}^D$, tau-mode uses a **bounded Rayleigh quotient**:
+For a head vector $x\in\mathbb{R}^D$, taumode uses a **bounded Rayleigh quotient**:
 
 $$
 E_{\text{raw}}(x) = \frac{x^\top L x}{x^\top x + \varepsilon},\quad
@@ -217,7 +217,7 @@ These logits then go through the same causal mask and numerically stable softmax
 
 ### Module layout
 
-In `tauattention.rs`, tau-mode attention is a full drop-in replacement for `CausalSelfAttention`:
+In `tauattention.rs`, taumode attention is a full drop-in replacement for `CausalSelfAttention`:
 
 - It keeps:
     - Q/K/V linear projections
@@ -371,7 +371,7 @@ pub fn forward(
     let q = rms_norm(q, 1e-6);
     let k = rms_norm(k, 1e-6);
 
-    // tau-mode attention
+    // taumode attention
     let y = self.scaled_tau_attention(q, k, v, t, t);
 
     // back to [B,T,C]
@@ -616,6 +616,6 @@ In other words, tauformer is **attention over manifold energies**, not just over
 If you want, the next step is to:
 
 - finalize and integrate `lambdas_from_heads_sparse_csr` into the codebase,
-- add tests that compare dense vs sparse tau-mode lambdas on small Laplacians,
+- add tests that compare dense vs sparse taumode lambdas on small Laplacians,
 - and run a profiling micro-benchmark to see where the crossover point is (T vs nnz vs D) on your target hardware.
 <span

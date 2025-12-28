@@ -15,6 +15,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use burn::prelude::*;
 use sprs::{CsMat, TriMat};
 
 /// Save a sparse matrix to Parquet (COO triplets format).
@@ -155,6 +156,16 @@ fn get_u64_scalar(batch: &RecordBatch, col_name: &str) -> Result<u64> {
         .with_context(|| format!("{} column missing or wrong type", col_name))?;
     anyhow::ensure!(col.len() > 0, "{} column is empty", col_name);
     Ok(col.value(0))
+}
+
+pub fn load_manifold_laplacian_for_head_dim<B: Backend>(
+    parquet_path: impl AsRef<std::path::Path>,
+    head_dim: usize,
+    device: &B::Device,
+) -> anyhow::Result<Tensor<B, 2>> {
+    // Reuse your existing parquet reading utilities here.
+    // Must return [head_dim, head_dim] on `device`.
+    todo!()
 }
 
 #[cfg(test)]

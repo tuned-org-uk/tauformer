@@ -112,6 +112,11 @@ pub fn compute_taumode(x: &[f64], gl: &CsMat<f64>, cfg: TauModeRuntime) -> f64 {
     e_raw / (e_raw + tau)
 }
 
+pub fn ensure_domain_manifold_exists(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    // if !path.exists() { build + write parquet }
+    todo!()
+}
+
 /// Convenience conversion (Burn tensors often yield f32).
 pub fn vec_f32_to_f64(x: &[f32]) -> Vec<f64> {
     x.iter().map(|&v| v as f64).collect()

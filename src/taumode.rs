@@ -75,7 +75,7 @@ pub fn laplacian_chain_dense<B: Backend>(d: usize, device: &B::Device) -> Featur
 ///
 /// E_raw = (x^T L x) / (x^T x + eps)
 /// E_bounded = E_raw / (E_raw + tau)
-/// lambda = E_bounded   (first version; later you can blend in dispersion as in arrowspace) [file:79]
+/// lambda = E_bounded   (first version; later you can blend in dispersion as in arrowspace)
 pub fn lambdas_from_heads<B: Backend>(
     x: Tensor<B, 4>,
     lap: &FeatureLaplacian<B>,

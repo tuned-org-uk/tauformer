@@ -1,4 +1,4 @@
-//! Tau-mode attention: uses feature-space Laplacian to compress tokens into scalar lambdas,
+//! Taumode attention: uses feature-space Laplacian to compress tokens into scalar lambdas,
 //! then scores via lambda-distance instead of QK^T.
 
 use burn::{
@@ -17,10 +17,10 @@ use crate::taumode::{
     taumode_distance_logits,
 };
 
-/// Tau-mode attention layer cache: stores (V, lambda_k) only.
+/// taumode attention layer cache: stores (V, lambda_k) only.
 pub type TauCacheLayer<B> = Option<(Tensor<B, 4>, Tensor<B, 3>)>;
 
-/// Tau-mode attention module.
+/// taumode attention module.
 #[derive(Module, Debug)]
 pub struct TauModeAttention<B: Backend> {
     pub(crate) layer_idx: usize,
@@ -114,6 +114,17 @@ impl<B: Backend> TauModeAttention<B> {
         }
     }
 
+    pub fn new_with_laplacian(
+        config: &NanoChatConfig,
+        layer_idx: usize,
+        device: &B::Device,
+        laplacian_dd: Tensor<B, 2>, // [head_dim, head_dim]
+    ) -> Self {
+        let mut this = Self::new(config, layer_idx, device);
+        this.laplacian_matrix = Param::from_tensor(laplacian_dd).set_require_grad(false);
+        this
+    }
+
     // Helper to reconstruct FeatureLaplacian on the fly
     pub fn get_laplacian(&self) -> FeatureLaplacian<B> {
         FeatureLaplacian {
@@ -128,13 +139,6 @@ impl<B: Backend> TauModeAttention<B> {
             eps: self.eps,
             temperature: self.temperature,
         }
-    }
-
-    fn norm_heads(&self, x: Tensor<B, 4>, ln: &LayerNorm<B>) -> Tensor<B, 4> {
-        let [b, h, t, d] = x.dims();
-        let xflat = x.reshape([b * h * t, d]);
-        let out = ln.forward(xflat);
-        out.reshape([b, h, t, d])
     }
 
     /// Forward pass (training/prefill): full sequence.
@@ -189,7 +193,7 @@ impl<B: Backend> TauModeAttention<B> {
             v.dims()
         );
 
-        // Tau-mode attention
+        // taumode attention
         let y = self.scaled_tau_attention(q, k, v, t, t);
 
         // (B, H, T, D) → (B, T, C)

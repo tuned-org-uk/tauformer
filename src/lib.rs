@@ -29,6 +29,7 @@ pub mod parquet;
 pub mod pretraining;
 pub mod rope;
 pub mod tauattention;
+pub mod taugpt;
 pub mod taumode;
 
 #[cfg(test)]
