@@ -2,7 +2,7 @@
 //! then scores via lambda-distance instead of QK^T.
 
 use burn::{
-    module::{Module, Param},
+    module::{Ignored, Module, Param},
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
     prelude::Backend,
     tensor::{Bool, Tensor, activation},
@@ -16,6 +16,10 @@ use crate::taumode::{
     FeatureLaplacian, TauModeConfig, lambdas_from_heads, mqa_expand_heads_4,
     taumode_distance_logits,
 };
+use sprs::CsMat;
+use std::sync::Arc;
+
+use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 
 /// taumode attention layer cache: stores (V, lambda_k) only.
 pub type TauCacheLayer<B> = Option<(Tensor<B, 4>, Tensor<B, 3>)>;
@@ -45,6 +49,11 @@ pub struct TauModeAttention<B: Backend> {
     pub(crate) tau: f32,
     pub(crate) eps: f32,
     pub(crate) temperature: f32,
+
+    // New sparse path (CPU-parallel, not a module param):
+    pub sparse_laplacian: Ignored<Option<Arc<CsMat<f64>>>>,
+
+    pub manifold_tau_mode: Ignored<Option<ManifoldTauMode>>,
 }
 
 impl<B: Backend> TauModeAttention<B> {
@@ -111,18 +120,47 @@ impl<B: Backend> TauModeAttention<B> {
             tau: tau_config.tau,
             eps: tau_config.eps,
             temperature: tau_config.temperature,
+            sparse_laplacian: Ignored(None),
+            manifold_tau_mode: Ignored(None),
         }
+    }
+
+    fn clear_sparse(mut self) -> Self {
+        self.sparse_laplacian = Ignored(None);
+        self.manifold_tau_mode = Ignored(None);
+        self
     }
 
     pub fn new_with_laplacian(
         config: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian_dd: Tensor<B, 2>, // [head_dim, head_dim]
+        laplacian_dd: Tensor<B, 2>,
     ) -> Self {
-        let mut this = Self::new(config, layer_idx, device);
+        let mut this = Self::new(config, layer_idx, device).clear_sparse();
         this.laplacian_matrix = Param::from_tensor(laplacian_dd).set_require_grad(false);
         this
+    }
+
+    pub fn new_with_sparse_laplacian(
+        config: &NanoChatConfig,
+        layer_idx: usize,
+        device: &B::Device,
+        laplacian: Arc<CsMat<f64>>, // CSR L = D - A [file:44]
+        tau_mode: ManifoldTauMode,  // from manifold.json [file:44]
+    ) -> Self {
+        let mut this = Self::new(config, layer_idx, device);
+        this.sparse_laplacian = Ignored(Some(laplacian));
+        this.manifold_tau_mode = Ignored(Some(tau_mode));
+        // Keep laplacian_matrix as-is (unused in sparse path).
+        this
+    }
+
+    fn set_dense_laplacian(mut self, laplacian_dd: Tensor<B, 2>) -> Self {
+        self.laplacian_matrix = Param::from_tensor(laplacian_dd).set_require_grad(false);
+        self.sparse_laplacian = Ignored(None);
+        self.manifold_tau_mode = Ignored(None);
+        self
     }
 
     // Helper to reconstruct FeatureLaplacian on the fly

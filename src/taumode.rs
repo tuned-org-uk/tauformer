@@ -6,6 +6,8 @@
 //! - Convert |Δlambda| into attention logits and reuse the existing stable softmax pipeline.
 
 use burn::tensor::{Bool, Tensor, activation, backend::Backend};
+use rayon::prelude::*;
+use sprs::CsMat;
 
 /// Config for taumode lambda + distance attention.
 #[derive(Clone, Copy, Debug)]
@@ -191,4 +193,74 @@ pub fn causal_softmax_over_keys<B: Backend>(
 
     // 3) softmax over keys
     activation::softmax(att, 3)
+}
+
+/// Compute per-vector Rayleigh quotient x^T L x / x^T x for a CSR matrix L.
+/// Ported from `arrowspace`.
+///
+/// Notes:
+/// - `L` is expected to be the *full Laplacian* (already L = D - A), as you stated. [file:27]
+/// - Returns >= 0 by clamping, consistent with ArrowSpace. [file:27]
+fn rayleigh_csr_f32(l: &CsMat<f64>, x: &[f32]) -> f32 {
+    debug_assert_eq!(l.rows(), l.cols());
+    debug_assert_eq!(l.rows(), x.len());
+
+    // numerator = Σ_i Σ_{j in nnz(i)} x_i * L_ij * x_j
+    let numerator: f64 = l
+        .outer_iterator()
+        .enumerate()
+        .map(|(i, row)| {
+            let xi = x[i] as f64;
+            row.iter()
+                .map(|(j, &lij)| xi * lij * (x[j] as f64))
+                .sum::<f64>()
+        })
+        .sum();
+
+    let denom: f64 = x.iter().map(|&v| (v as f64) * (v as f64)).sum();
+
+    if denom > 1e-12 {
+        ((numerator / denom).max(0.0)) as f32
+    } else {
+        0.0
+    }
+}
+
+/// Compute bounded taumode energy for attention heads using sparse CSR Laplacian.
+/// Input: `heads` shape [B, H, T, D]
+/// Output: lambdas shape [B, H, T]
+pub fn lambdas_from_heads_sparse<B: Backend>(
+    heads: Tensor<B, 4>,
+    laplacian: &CsMat<f64>, // D×D, CSR
+    tau: f32,
+) -> Tensor<B, 3> {
+    let [b, h, t, d] = heads.dims();
+    assert_eq!(laplacian.rows(), d, "L rows must match head_dim");
+    assert_eq!(laplacian.cols(), d, "L cols must match head_dim");
+
+    // CPU-bound path: download to host.
+    // This matches the “not GPU bound for now” requirement. [file:27]
+    let data: Vec<f32> = heads.to_data().to_vec().expect("heads to f32 vec");
+
+    let n = b * h * t;
+    let mut out = vec![0.0f32; n];
+
+    // Each vector is contiguous in the last dimension D.
+    out.par_iter_mut().enumerate().for_each(|(idx, dst)| {
+        let start = idx * d;
+        let x = &data[start..start + d];
+
+        let e_raw = rayleigh_csr_f32(laplacian, x);
+
+        // ArrowSpace’s bounded transformation: E_bounded = E_raw / (E_raw + tau). [file:27]
+        let e_bounded = if e_raw > 0.0 {
+            e_raw / (e_raw + tau)
+        } else {
+            0.0
+        };
+
+        *dst = e_bounded;
+    });
+
+    Tensor::<B, 1>::from_floats(out.as_slice(), &heads.device()).reshape([b, h, t])
 }

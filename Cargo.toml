@@ -48,6 +48,7 @@ tempfile = "3.23.0"
 sprs = "0.11.4"
 parquet = { version = "57.0.0" }
 arrow = { version = "57.0.0" }
+rayon = "1.11.0"
 
 # bpe-tokenizer = "0.1.4"
 # this is the rustbpe from the original nanochat

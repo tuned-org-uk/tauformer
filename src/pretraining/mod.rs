@@ -3,12 +3,13 @@
 //! The manifold is "acquired knowledge": trained offline on domain embeddings,
 //! persisted via parquet, and loaded at runtime for taumode(Q/K).
 
+pub mod parquet;
+pub(crate) mod parse;
+
 use anyhow::{Context, Result};
 use std::path::Path;
 
 use sprs::CsMat;
-
-use crate::parquet;
 
 /// Only persistent artifact needed at tauformer runtime.
 #[derive(Debug, Clone)]

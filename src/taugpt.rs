@@ -15,6 +15,10 @@ use crate::config::NanoChatConfig;
 use crate::gpt::rms_norm;
 use crate::rope::precompute_rotary_embeddings;
 use crate::tauattention::{TauCacheLayer, TauModeAttention};
+use sprs::CsMat;
+use std::sync::Arc;
+
+use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 
 /// Tau KV cache: per-layer cache stores (V, lambda_k), plus the current decode position.
 #[derive(Debug)]
@@ -85,16 +89,21 @@ pub struct TauBlock<B: Backend> {
 }
 
 impl<B: Backend> TauBlock<B> {
-    pub fn new_with_laplacian(
+    pub fn new_with_sparse_laplacian(
         cfg: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian_dd: Tensor<B, 2>, // [head_dim, head_dim]
+        laplacian: Arc<CsMat<f64>>,
+        tau_mode: ManifoldTauMode,
     ) -> Self {
+        info!("Initializing TauBlock {} (sparse laplacian)", layer_idx);
+
         Self {
             layer_idx,
             ln1: LayerNormConfig::new(cfg.n_embd).init(device),
-            attn: TauModeAttention::new_with_laplacian(cfg, layer_idx, device, laplacian_dd),
+            attn: TauModeAttention::new_with_sparse_laplacian(
+                cfg, layer_idx, device, laplacian, tau_mode,
+            ),
             ln2: LayerNormConfig::new(cfg.n_embd).init(device),
             mlp: Mlp::new(cfg, device),
         }
@@ -147,20 +156,39 @@ pub struct TauGptModel<B: Backend> {
 
 impl<B: Backend> TauGptModel<B> {
     /// Build TauGPT with an externally provided Laplacian (dense [head_dim, head_dim]).
-    pub fn new_with_laplacian(
+    pub fn new_with_sparse_laplacian(
         cfg: &NanoChatConfig,
         device: &B::Device,
-        laplacian_dd: Tensor<B, 2>,
+        laplacian: Arc<CsMat<f64>>, // CSR L = D - A from ArrowSpace [file:44]
+        tau_mode: ManifoldTauMode,  // from manifold.json [file:44]
     ) -> Self {
-        info!("Initializing TauGptModel");
+        info!("Initializing TauGptModel (sparse laplacian)");
+
         let head_dim = cfg.n_embd / cfg.n_head;
+        assert!(
+            laplacian.rows() == laplacian.cols(),
+            "Manifold Laplacian must be square, got {}x{}",
+            laplacian.rows(),
+            laplacian.cols()
+        );
+        assert!(
+            laplacian.rows() == head_dim,
+            "Sparse Laplacian dim {} must match head_dim {}",
+            laplacian.rows(),
+            head_dim
+        );
+
         let (cos, sin) =
             precompute_rotary_embeddings(cfg.sequence_len + 1, head_dim, 10000.0, device);
+        debug!("RoPE cache cos {:?}, sin {:?}", cos.dims(), sin.dims());
 
         let wte = EmbeddingConfig::new(cfg.vocab_size, cfg.n_embd).init(device);
 
+        // Each layer shares the same manifold Laplacian + tau selection policy. [file:44]
         let blocks = (0..cfg.n_layer)
-            .map(|i| TauBlock::new_with_laplacian(cfg, i, device, laplacian_dd.clone()))
+            .map(|i| {
+                TauBlock::new_with_sparse_laplacian(cfg, i, device, laplacian.clone(), tau_mode)
+            })
             .collect::<Vec<_>>();
 
         let lnf = LayerNormConfig::new(cfg.n_embd).init(device);
@@ -173,6 +201,8 @@ impl<B: Backend> TauGptModel<B> {
             .with_bias(false)
             .with_initializer(init)
             .init(device);
+
+        info!("TauGptModel (sparse) initialization complete");
 
         Self {
             wte,

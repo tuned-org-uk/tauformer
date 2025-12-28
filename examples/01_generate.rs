@@ -1,13 +1,8 @@
 // examples/generate.rs
 use burn::tensor::{Int, Tensor};
 use tauformer::{
-    backend::AutoBackend as B,
-    config::NanoChatConfig,
-    gpt::GptModel,
-    parquet,
-    pretraining,
-    // You add a tau-enabled GPT wrapper (see note below).
-    // taugpt::TauGptModel,
+    backend::AutoBackend as B, config::NanoChatConfig, gpt::GptModel, pretraining,
+    taugpt::TauGptModel,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -37,18 +32,30 @@ fn main() -> anyhow::Result<()> {
         .reshape([1, prompt_ids.len()]);
 
     if mode == "tau" {
-        let manifold_path = std::path::Path::new("./domain_manifold/manifold.parquet");
-        pretraining::ensure_domain_manifold_exists(manifold_path)?; // if you already have this logic
+        let manifold_parquet = std::path::Path::new("./domain_manifold/manifold.parquet");
+        pretraining::ensure_domain_manifold_exists(manifold_parquet)?; // keep your check
+
+        let domain = pretraining::parquet::load_domain_manifold(manifold_parquet)?;
         let head_dim = cfg.n_embd / cfg.n_head;
 
-        let lap =
-            parquet::load_manifold_laplacian_for_head_dim::<B>(manifold_path, head_dim, &device)?;
+        anyhow::ensure!(
+            head_dim == domain.nfeatures,
+            "Tau requires head_dim == manifold nfeatures (got head_dim={}, nfeatures={})",
+            head_dim,
+            domain.nfeatures
+        );
 
-        // TODO: build a Tau-enabled GPT (see next bullet).
-        // let model = TauGptModel::<B>::new_with_laplacian(&cfg, &device, lap);
-        // let out = model.generate_greedy(idx, max_new);
+        // Pass CSR + tau_mode into your Tau GPT wiring (TauModeAttention keeps them as ignored fields).
+        let model = TauGptModel::<B>::new_with_sparse_laplacian(
+            &cfg,
+            &device,
+            std::sync::Arc::new(domain.laplacian),
+            domain.tau_mode,
+        );
 
-        anyhow::bail!("Tau GPT wrapper not wired yet (needs blocks using TauModeAttention).");
+        let out = model.generate(idx, max_new);
+        let out_ids: Vec<i64> = out.to_data().to_vec().unwrap();
+        println!("{out_ids:?}");
     } else {
         let model = GptModel::<B>::new(&cfg, &device); // existing causal GPT
         let out = model.generate(idx, max_new); // existing generation path

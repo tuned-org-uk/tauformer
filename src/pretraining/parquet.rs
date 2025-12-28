@@ -3,9 +3,6 @@
 //! Copied/simplified from ArrowSpace storage, keeping only what's needed
 //! for GraphLaplacian persistence.
 
-use anyhow::{Context, Result};
-use std::fs::File;
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, RecordBatch, StringArray, UInt64Array};
@@ -15,8 +12,116 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use anyhow::{Context, Result};
 use burn::prelude::*;
+use burn::tensor::{Tensor, backend::Backend};
+use serde::Deserialize;
 use sprs::{CsMat, TriMat};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+/// Mirror ArrowSpace TauMode options (the ones encoded in manifold.json). [file:27][file:28]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TauMode {
+    Fixed, // not used from json in your example, but kept for completeness
+    Median,
+    Mean,
+    Percentile, // percentile value would need an extra field if you decide to encode it
+}
+
+impl FromStr for TauMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Median" => Ok(TauMode::Median),
+            "Mean" => Ok(TauMode::Mean),
+            // If you later encode Percentile(p) explicitly in JSON, extend this.
+            other => anyhow::bail!("Unsupported TauMode in manifold.json: {}", other),
+        }
+    }
+}
+
+/// Only the JSON fields we actually need (matches your nested encoding). [file:28]
+#[derive(Debug, Deserialize)]
+struct ManifoldMeta {
+    builder_config: BuilderConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuilderConfig {
+    synthesis: Synthesis,
+    nfeatures: WrappedUsize,
+}
+
+#[derive(Debug, Deserialize)]
+struct Synthesis {
+    #[serde(rename = "TauMode")]
+    tau_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrappedUsize {
+    #[serde(rename = "Usize")]
+    value: usize,
+}
+
+pub struct DomainManifold {
+    pub laplacian: CsMat<f64>, // CSR Laplacian [file:23]
+    pub tau_mode: TauMode,     // Derived from manifold.json [file:28]
+    pub nfeatures: usize,      // Should match laplacian rows [file:28]
+    pub meta_path: PathBuf,
+}
+
+/// Load manifold.parquet (CSR Laplacian) + manifold.json metadata. [file:23][file:28]
+pub fn load_domain_manifold(manifold_parquet_path: impl AsRef<Path>) -> Result<DomainManifold> {
+    let parquet_path = manifold_parquet_path.as_ref();
+    let dir = parquet_path
+        .parent()
+        .context("manifold parquet path has no parent directory")?;
+
+    let meta_path = dir.join("manifold.json");
+
+    // 1) Load metadata (tau mode + feature dimension). [file:28]
+    let meta_file = File::open(&meta_path)
+        .with_context(|| format!("Failed to open manifold metadata: {:?}", meta_path))?;
+    let meta: ManifoldMeta = serde_json::from_reader(meta_file)
+        .with_context(|| format!("Failed to parse manifold metadata JSON: {:?}", meta_path))?;
+
+    let nfeatures = meta.builder_config.nfeatures.value;
+    let tau_mode = TauMode::from_str(meta.builder_config.synthesis.tau_mode.as_str())?;
+
+    // 2) Load CSR Laplacian (COO triplets -> CSR). [file:23]
+    let laplacian = load_sparse_matrix(parquet_path).with_context(|| {
+        format!(
+            "Failed to load manifold laplacian parquet: {:?}",
+            parquet_path
+        )
+    })?;
+
+    anyhow::ensure!(
+        laplacian.rows() == laplacian.cols(),
+        "Manifold Laplacian must be square, got {}x{}",
+        laplacian.rows(),
+        laplacian.cols()
+    );
+    anyhow::ensure!(
+        laplacian.rows() == nfeatures,
+        "Metadata nfeatures={} does not match laplacian dim={} (rows)",
+        nfeatures,
+        laplacian.rows()
+    );
+
+    Ok(DomainManifold {
+        laplacian,
+        tau_mode,
+        nfeatures,
+        meta_path,
+    })
+}
 
 /// Save a sparse matrix to Parquet (COO triplets format).
 ///
@@ -159,13 +264,32 @@ fn get_u64_scalar(batch: &RecordBatch, col_name: &str) -> Result<u64> {
 }
 
 pub fn load_manifold_laplacian_for_head_dim<B: Backend>(
-    parquet_path: impl AsRef<std::path::Path>,
+    parquet_path: impl AsRef<Path>,
     head_dim: usize,
-    device: &B::Device,
-) -> anyhow::Result<Tensor<B, 2>> {
-    // Reuse your existing parquet reading utilities here.
-    // Must return [head_dim, head_dim] on `device`.
-    todo!()
+    _device: &B::Device,
+) -> anyhow::Result<CsMat<f64>> {
+    // Loads both manifold.parquet (CSR Laplacian) and manifold.json metadata. [file:44]
+    let domain = load_domain_manifold(parquet_path.as_ref())?;
+
+    anyhow::ensure!(head_dim > 0, "head_dim must be > 0");
+    anyhow::ensure!(
+        domain.nfeatures == head_dim,
+        "manifold nfeatures={} must match head_dim={}",
+        domain.nfeatures,
+        head_dim
+    );
+
+    let lap = domain.laplacian;
+    anyhow::ensure!(
+        lap.rows() == head_dim && lap.cols() == head_dim,
+        "laplacian shape mismatch: got {}x{}, expected {}x{}",
+        lap.rows(),
+        lap.cols(),
+        head_dim,
+        head_dim
+    );
+
+    Ok(lap)
 }
 
 #[cfg(test)]

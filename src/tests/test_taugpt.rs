@@ -1,6 +1,6 @@
 // tests/test_taugpt.rs
 //
-// Tests for TauGptModel (taumode attention GPT).
+// Tests for TauGptModel (taumode attention GPT) using the sparse constructor only.
 //
 // Covers:
 // - Model construction
@@ -15,6 +15,9 @@ use burn::tensor::{Int, Tensor};
 use crate::backend::AutoBackend;
 use crate::config::NanoChatConfig;
 use crate::taugpt::{TauGptModel, TauKVCache};
+
+use sprs::TriMat;
+use std::sync::Arc;
 
 type B = AutoBackend;
 
@@ -37,10 +40,22 @@ fn max_abs_diff(a: Tensor<B, 3>, b: Tensor<B, 3>) -> f32 {
     v.into_iter().fold(0.0f32, |m, x| m.max(x))
 }
 
-fn build_laplacian_dd(device: &<B as Backend>::Device, head_dim: usize) -> Tensor<B, 2> {
-    // Reuse existing Laplacian builder and pass dense [D,D] into TauGptModel.
-    // This assumes you kept laplacian_chain_dense in `taumode.rs` returning FeatureLaplacian { matrix }.
-    crate::taumode::laplacian_chain_dense::<B>(head_dim, device).matrix
+fn build_identity_laplacian_csr(head_dim: usize) -> sprs::CsMat<f64> {
+    // Minimal valid Laplacian-like matrix (PSD, square, simple).
+    // This is just to satisfy the constructor and keep tests deterministic.
+    let mut tri = TriMat::<f64>::new((head_dim, head_dim));
+    for i in 0..head_dim {
+        tri.add_triplet(i, i, 1.0);
+    }
+    tri.to_csr()
+}
+
+fn build_model(cfg: &NanoChatConfig, device: &<B as Backend>::Device) -> TauGptModel<B> {
+    let head_dim = cfg.n_embd / cfg.n_head;
+    let lap = Arc::new(build_identity_laplacian_csr(head_dim));
+    let tau_mode = crate::pretraining::parquet::TauMode::Median;
+
+    TauGptModel::<B>::new_with_sparse_laplacian(cfg, device, lap, tau_mode)
 }
 
 fn assert_logits_finite(logits: &Tensor<B, 3>) {
@@ -50,10 +65,7 @@ fn assert_logits_finite(logits: &Tensor<B, 3>) {
 
 fn run_forward_decode_equivalence(cfg: NanoChatConfig) {
     let device = <B as Backend>::Device::default();
-    let head_dim = cfg.n_embd / cfg.n_head;
-    let lap_dd = build_laplacian_dd(&device, head_dim);
-
-    let model = TauGptModel::<B>::new_with_laplacian(&cfg, &device, lap_dd);
+    let model = build_model(&cfg, &device);
 
     let bsz = 2usize;
     let t = 8usize;
@@ -94,23 +106,17 @@ fn run_forward_decode_equivalence(cfg: NanoChatConfig) {
 }
 
 #[test]
-fn test_taugpt_construction() {
+fn test_taugpt_construction_sparse() {
     let cfg = tiny_cfg(4, 2);
     let device = <B as Backend>::Device::default();
-    let head_dim = cfg.n_embd / cfg.n_head;
-    let lap_dd = build_laplacian_dd(&device, head_dim);
-
-    let _model = TauGptModel::<B>::new_with_laplacian(&cfg, &device, lap_dd);
+    let _model = build_model(&cfg, &device);
 }
 
 #[test]
-fn test_taugpt_forward_shape_and_finite() {
+fn test_taugpt_forward_shape_and_finite_sparse() {
     let cfg = tiny_cfg(4, 2);
     let device = <B as Backend>::Device::default();
-    let head_dim = cfg.n_embd / cfg.n_head;
-    let lap_dd = build_laplacian_dd(&device, head_dim);
-
-    let model = TauGptModel::<B>::new_with_laplacian(&cfg, &device, lap_dd);
+    let model = build_model(&cfg, &device);
 
     let bsz = 3usize;
     let t = 6usize;
@@ -126,17 +132,15 @@ fn test_taugpt_forward_shape_and_finite() {
 }
 
 #[test]
-fn test_taugpt_generation_determinism() {
+fn test_taugpt_generation_determinism_sparse() {
     let cfg = tiny_cfg(4, 2);
     let device = <B as Backend>::Device::default();
-    let head_dim = cfg.n_embd / cfg.n_head;
-    let lap_dd = build_laplacian_dd(&device, head_dim);
-
-    let model = TauGptModel::<B>::new_with_laplacian(&cfg, &device, lap_dd);
+    let model = build_model(&cfg, &device);
 
     let prompt: Vec<i64> = vec![1, 2, 3, 4];
     let idx = Tensor::<B, 1, Int>::from_ints(prompt.as_slice(), &device).reshape([1, prompt.len()]);
 
+    // TauGptModel exposes `generate(...)` in your current implementation. [file:46]
     let out1 = model.generate(idx.clone(), 8);
     let out2 = model.generate(idx, 8);
 
@@ -146,13 +150,13 @@ fn test_taugpt_generation_determinism() {
 }
 
 #[test]
-fn test_taugpt_forward_decode_matches_no_mqa() {
+fn test_taugpt_forward_decode_matches_no_mqa_sparse() {
     // Regime 1: n_head == n_kv_head (no MQA expansion).
     run_forward_decode_equivalence(tiny_cfg(4, 4));
 }
 
 #[test]
-fn test_taugpt_forward_decode_matches_mqa() {
+fn test_taugpt_forward_decode_matches_mqa_sparse() {
     // Regime 2: n_head != n_kv_head (MQA expansion).
     run_forward_decode_equivalence(tiny_cfg(4, 2));
 }

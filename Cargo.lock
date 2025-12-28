@@ -3942,6 +3942,7 @@ dependencies = [
  "log",
  "ndarray",
  "parquet",
+ "rayon",
  "rmp-serde",
  "serde",
  "serde_json",
