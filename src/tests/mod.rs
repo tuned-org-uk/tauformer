@@ -6,6 +6,7 @@ mod test_compare;
 mod test_gpt;
 mod test_mqa_regimes;
 mod test_sampling;
+mod test_synthetic_tasks;
 mod test_tauattention;
 mod test_taugpt;
 mod test_taumode;
