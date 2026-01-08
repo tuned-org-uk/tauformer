@@ -57,6 +57,8 @@ rayon = "1.11.0"
 [dev-dependencies]
 approx = "0.5.1"
 rstest = "0.21.0"
+criterion = "0.5"
+
 
 [features]
 default = ["cpu"]
@@ -74,6 +76,10 @@ crate-type = ["rlib"]
 [[bin]]
 name = "tauformer"
 path = "src/main.rs"
+
+[[bench]]
+name = "attention"
+harness = false
 
 [profile.release]
 opt-level = 3

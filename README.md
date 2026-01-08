@@ -4,6 +4,12 @@
 
 Tauformer replaces standard inner-product attention with **taumode distance scoring**, compressing token representations into scalar synthetic indices derived from feature-space topological analysis. This enables constant-memory key storage while maintaining full attention expressiveness.
 
+## Quick bench
+> Note: `TauGptModel::new_with_sparse_laplacian` requires a Laplacian file path, so the bench below benchmarks `GptModel` end-to-end and the TauMode kernel only. For a full benchmark use [`taugpt-kvcache-bench`](https://github.com/tuned-org-uk/taugpt-kvcache-bench)
+```
+$ cargo bench --features cpu
+```
+
 ## Overview
 
 Standard transformer attention computes \( O(T^2) \) pairwise scores via \( QK^\top \), then applies softmax and weighted sum with \( V \). Tauformer innovates by:
