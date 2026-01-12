@@ -7,7 +7,7 @@ use burn::{
     prelude::Backend,
     tensor::{Bool, Tensor, activation},
 };
-use log::{debug, info};
+use log::debug;
 
 use crate::config::NanoChatConfig;
 use crate::rope::{apply_rotary_emb, apply_rotary_emb_step};
@@ -40,7 +40,7 @@ pub struct TauModeAttention<B: Backend> {
 
     // Store Laplacian matrix directly as a parameter (will be saved/loaded)
     laplacian_tensor: Option<Param<Tensor<B, 2>>>, // using dense
-    laplacian_matrix: Ignored<Option<CsMat<f64>>>, // using sparse
+    laplacian_matrix: Ignored<Option<CsMat<f32>>>, // using sparse
 
     pub(crate) tau_mode: Ignored<Option<TauMode>>,
     // Store tau config as plain fields (not Module members)
@@ -132,7 +132,7 @@ impl<B: Backend> TauModeAttention<B> {
         config: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian: &CsMat<f64>,
+        laplacian: &CsMat<f32>,
         tau_mode: TauMode,
     ) -> Self {
         assert_eq!(
@@ -171,7 +171,7 @@ impl<B: Backend> TauModeAttention<B> {
     }
 
     // Helper to access the matrix if set
-    pub fn get_laplacian_matrix(&self) -> &CsMat<f64> {
+    pub fn get_laplacian_matrix(&self) -> &CsMat<f32> {
         debug!(
             "Layer {} TauAttn: get_laplacian_matrix called (is_some={})",
             self.layer_idx,

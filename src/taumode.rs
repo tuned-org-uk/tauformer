@@ -201,13 +201,13 @@ pub fn causal_softmax_over_keys<B: Backend>(
 
 use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 
-const TAU_FLOOR: f64 = 1e-10;
+const TAU_FLOOR: f32 = 1e-10;
 
-fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f64 {
-    let mut v: Vec<f64> = x
+fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f32 {
+    let mut v: Vec<f32> = x
         .iter()
         .copied()
-        .map(|a| a as f64)
+        .map(|a| a)
         .filter(|a| a.is_finite())
         .collect();
     if v.is_empty() {
@@ -225,8 +225,8 @@ fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f64 {
             mid.max(TAU_FLOOR)
         }
         ManifoldTauMode::Mean => {
-            let sum: f64 = v.iter().sum();
-            (sum / (v.len() as f64)).max(TAU_FLOOR)
+            let sum: f32 = v.iter().sum();
+            (sum / (v.len() as f32)).max(TAU_FLOOR)
         }
         // If you later support these in your JSON/enum, extend here.
         _ => TAU_FLOOR,
@@ -234,17 +234,17 @@ fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f64 {
 }
 
 // Bounded Rayleigh quotient using CSR: E_raw = (x^T L x) / (x^T x + eps), then E/(E+tau).
-fn taumode_bounded_csr(x: &[f32], l: &CsMat<f64>, tau: f64, eps: f64) -> f32 {
+fn taumode_bounded_csr(x: &[f32], l: &CsMat<f32>, tau: f32, eps: f32) -> f32 {
     debug_assert_eq!(l.rows(), l.cols());
     debug_assert_eq!(l.rows(), x.len());
 
     // numerator = x^T L x
-    let mut numerator = 0.0f64;
+    let mut numerator = 0.0f32;
     for (i, row) in l.outer_iterator().enumerate() {
-        let xi = x[i] as f64;
-        let mut row_dot = 0.0f64;
+        let xi = x[i];
+        let mut row_dot = 0.0f32;
         for (j, lij) in row.iter() {
-            row_dot += lij * (x[j] as f64);
+            row_dot += lij * (x[j]);
         }
         numerator += xi * row_dot;
     }
@@ -252,7 +252,7 @@ fn taumode_bounded_csr(x: &[f32], l: &CsMat<f64>, tau: f64, eps: f64) -> f32 {
     // denom = x^T x + eps
     let mut denom = eps;
     for &xi in x {
-        let v = xi as f64;
+        let v = xi;
         denom += v * v;
     }
 
@@ -269,7 +269,7 @@ fn taumode_bounded_csr(x: &[f32], l: &CsMat<f64>, tau: f64, eps: f64) -> f32 {
 /// heads: [B,H,T,D] -> [B,H,T]
 pub fn lambdas_from_heads_sparse<B: Backend>(
     heads: Tensor<B, 4>,
-    laplacian: &CsMat<f64>,
+    laplacian: &CsMat<f32>,
     tau_mode: ManifoldTauMode,
     eps: f32,
 ) -> Tensor<B, 3> {
@@ -281,7 +281,7 @@ pub fn lambdas_from_heads_sparse<B: Backend>(
     let host: Vec<f32> = heads.to_data().to_vec().expect("heads must be f32");
     let n = b * h * t;
 
-    let eps64 = (eps as f64).max(1e-12);
+    let eps64 = eps.max(1e-12);
 
     let mut out = vec![0.0f32; n];
     out.par_iter_mut().enumerate().for_each(|(idx, dst)| {

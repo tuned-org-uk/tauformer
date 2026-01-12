@@ -14,11 +14,11 @@ use sprs::CsMat;
 /// Only persistent artifact needed at tauformer runtime.
 #[derive(Debug, Clone)]
 pub struct DomainManifold {
-    pub matrix: CsMat<f64>,
+    pub matrix: CsMat<f32>,
 }
 
 impl DomainManifold {
-    pub fn laplacian(&self) -> &CsMat<f64> {
+    pub fn laplacian(&self) -> &CsMat<f32> {
         &self.matrix
     }
 
@@ -30,26 +30,26 @@ impl DomainManifold {
 /// Save the domain manifold Laplacian to a parquet file.
 ///
 /// `name_id` is the base filename (e.g., "manifold" → "manifold.parquet").
-pub fn save_domain_manifold(
-    manifold: &DomainManifold,
-    dir: impl AsRef<Path>,
-    name_id: &str,
-) -> Result<()> {
-    std::fs::create_dir_all(dir.as_ref()).context("Failed to create manifold directory")?;
+// pub fn save_domain_manifold(
+//     manifold: &DomainManifold,
+//     dir: impl AsRef<Path>,
+//     name_id: &str,
+// ) -> Result<()> {
+//     std::fs::create_dir_all(dir.as_ref()).context("Failed to create manifold directory")?;
 
-    parquet::save_sparse_matrix(&manifold.matrix, dir.as_ref(), name_id)
-        .context("Failed to save GraphLaplacian to parquet")
-}
+//     parquet::save_sparse_matrix(&manifold.matrix, dir.as_ref(), name_id)
+//         .context("Failed to save GraphLaplacian to parquet")
+// }
 
 /// Load the domain manifold Laplacian from a parquet file.
 ///
 /// `path` is the full path including .parquet extension
 /// (e.g., "./pretraining/manifold.parquet").
 pub fn load_domain_manifold(path: impl AsRef<Path>) -> Result<DomainManifold> {
-    let lap: CsMat<f64> = parquet::load_sparse_matrix(&path)
+    let lap_f64: CsMat<f64> = parquet::load_sparse_matrix(&path)
         .with_context(|| format!("Failed to load laplacian parquet at {:?}", path.as_ref()))?;
 
-    let (r, c) = lap.shape();
+    let (r, c) = lap_f64.shape();
     anyhow::ensure!(
         r == c,
         "Domain Laplacian must be square (feature-space F×F), got {}×{}",
@@ -57,14 +57,17 @@ pub fn load_domain_manifold(path: impl AsRef<Path>) -> Result<DomainManifold> {
         c
     );
 
+    // Downcast f64 -> f32 before saving into DomainManifold.
+    let lap: CsMat<f32> = lap_f64.map(|x| *x as f32);
+
     Ok(DomainManifold { matrix: lap })
 }
 
 /// Minimal taumode runtime config.
 #[derive(Clone, Copy, Debug)]
 pub struct TauModeRuntime {
-    pub tau: f64,
-    pub eps: f64,
+    pub tau: f32,
+    pub eps: f32,
 }
 
 impl Default for TauModeRuntime {
@@ -81,17 +84,17 @@ impl Default for TauModeRuntime {
 /// Bounded Rayleigh quotient:
 /// E_raw = (x^T L x) / (x^T x + eps)
 /// E_bounded = E_raw / (E_raw + tau)
-pub fn compute_taumode(x: &[f64], gl: &CsMat<f64>, cfg: TauModeRuntime) -> f64 {
-    let l: &CsMat<f64> = &gl;
+pub fn compute_taumode(x: &[f32], gl: &CsMat<f32>, cfg: TauModeRuntime) -> f32 {
+    let l: &CsMat<f32> = &gl;
 
     debug_assert_eq!(l.rows(), l.cols());
     debug_assert_eq!(l.rows(), x.len());
 
     // numerator = x^T L x
-    let mut numerator = 0.0f64;
+    let mut numerator = 0.0f32;
     for (i, row) in l.outer_iterator().enumerate() {
         let xi = x[i];
-        let mut row_dot = 0.0f64;
+        let mut row_dot = 0.0f32;
         for (j, lij) in row.iter() {
             row_dot += lij * x[j];
         }
@@ -130,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_compute_taumode_identity() {
-        let mut tri = TriMat::<f64>::new((3, 3));
+        let mut tri = TriMat::<f32>::new((3, 3));
         tri.add_triplet(0, 0, 1.0);
         tri.add_triplet(1, 1, 1.0);
         tri.add_triplet(2, 2, 1.0);
@@ -145,26 +148,5 @@ mod tests {
         let v = compute_taumode(&x, &gl, cfg);
         // e_raw=1 => e_bounded=0.5
         assert!((v - 0.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_save_load_manifold() {
-        let _ = std::fs::create_dir_all("./test_data");
-
-        let mut tri = TriMat::<f64>::new((2, 2));
-        tri.add_triplet(0, 0, 2.0);
-        tri.add_triplet(0, 1, -1.0);
-        tri.add_triplet(1, 0, -1.0);
-        tri.add_triplet(1, 1, 2.0);
-
-        let original = DomainManifold {
-            matrix: tri.to_csr(),
-        };
-
-        save_domain_manifold(&original, "./test_data", "test_manifold").unwrap();
-        let loaded = load_domain_manifold("./test_data/test_manifold.parquet").unwrap();
-
-        assert_eq!(original.matrix.shape(), loaded.matrix.shape());
-        assert_eq!(original.matrix.nnz(), loaded.matrix.nnz());
     }
 }

@@ -520,7 +520,7 @@ The `pretraining.rs` module defines `DomainManifold` and `load_domain_manifold` 
 // pretraining.rs
 #[derive(Debug, Clone)]
 pub struct DomainManifold {
-    pub matrix: CsMat<f64>,
+    pub matrix: CsMat<f32>,
 }
 
 pub fn load_domain_manifold(path: impl AsRef<Path>) -> Result<DomainManifold> {

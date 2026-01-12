@@ -5,19 +5,18 @@
 //! but the per-layer cache stores (V, lambda_k) as defined by TauModeAttention.
 
 use burn::{
-    module::{Ignored, Module},
+    module::Module,
     nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
     tensor::{Int, Tensor, activation, backend::Backend},
 };
 use log::{debug, info, trace};
 use std::path::Path;
 
-use crate::causalattention::rms_norm;
 use crate::config::NanoChatConfig;
 use crate::rope::precompute_rotary_embeddings;
 use crate::tauattention::{TauCacheLayer, TauModeAttention};
+use crate::{causalattention::rms_norm, pretraining::DomainManifold};
 use sprs::CsMat;
-use std::sync::Arc;
 
 use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 
@@ -94,7 +93,7 @@ impl<B: Backend> TauBlock<B> {
         cfg: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian: &CsMat<f64>,
+        laplacian: &CsMat<f32>,
         tau_mode: crate::pretraining::parquet::TauMode,
     ) -> Self {
         info!("Initializing TauBlock {} (sparse laplacian)", layer_idx);
@@ -164,19 +163,20 @@ impl<B: Backend> TauGptModel<B> {
         info!("Initializing TauGptModel (sparse laplacian)");
 
         let head_dim = cfg.n_embd / cfg.n_head;
-        let laplacian = crate::pretraining::parquet::load_sparse_matrix(laplacian_path).unwrap();
+        let domain_manifold: DomainManifold =
+            crate::pretraining::load_domain_manifold(laplacian_path).unwrap();
 
-        assert!(laplacian.rows() == head_dim);
+        assert!(domain_manifold.laplacian().rows() == head_dim);
         assert!(
-            laplacian.rows() == laplacian.cols(),
+            domain_manifold.laplacian().rows() == domain_manifold.laplacian().cols(),
             "Manifold Laplacian must be square, got {}x{}",
-            laplacian.rows(),
-            laplacian.cols()
+            domain_manifold.laplacian().rows(),
+            domain_manifold.laplacian().cols()
         );
         assert!(
-            laplacian.rows() == head_dim,
+            domain_manifold.laplacian().rows() == head_dim,
             "Sparse Laplacian dim {} must match head_dim {}",
-            laplacian.rows(),
+            domain_manifold.laplacian().rows(),
             head_dim
         );
 
@@ -199,7 +199,7 @@ impl<B: Backend> TauGptModel<B> {
 
         info!("TauGptModel (sparse) initialization complete");
 
-        let laplacian = Arc::new(laplacian);
+        let laplacian = domain_manifold.laplacian();
         Self {
             wte,
             // Each layer shares the same manifold Laplacian + tau selection policy.
