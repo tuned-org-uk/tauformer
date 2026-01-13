@@ -595,7 +595,7 @@ impl<B: Backend> TauModeAttention<B> {
         att = att.mask_fill(mask_4d, -1.0e9);
 
         // Stable softmax
-        let att_max = att.clone().max_dim(3).squeeze::<3>(3);
+        let att_max = att.clone().max_dim(3).flatten::<3>(2, 3);
         att = att - att_max.unsqueeze_dim::<4>(3);
         let att = activation::softmax(att, 3);
 
@@ -693,7 +693,7 @@ impl<B: Backend> TauModeAttention<B> {
 
         att = att.mask_fill(mask_4d, -1.0e9);
 
-        let att_max = att.clone().max_dim(3).squeeze::<3>(3);
+        let att_max = att.clone().max_dim(3).flatten::<3>(2, 3);
         att = att - att_max.unsqueeze_dim::<4>(3);
         let att = activation::softmax(att, 3);
 

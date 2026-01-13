@@ -192,7 +192,7 @@ pub fn causal_softmax_over_keys<B: Backend>(
     att = att.mask_fill(mask4, -1.0e9); // Fill upper-tri (where mask=true) with -1e9
 
     // 2) subtract row max (dim=3)
-    let att_max = att.clone().max_dim(3).squeeze::<3>(3); // [B,H,Tq]
+    let att_max = att.clone().max_dim(3).flatten::<3>(2, 3); // [B,H,Tq]
     att = att - att_max.unsqueeze_dim::<4>(3);
 
     // 3) softmax over keys
