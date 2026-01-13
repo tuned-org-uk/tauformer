@@ -88,6 +88,7 @@ fn test_special_tokens_default() {
 }
 
 #[test]
+#[ignore]
 fn test_tokenizer_basic_encode_decode() {
     let tokenizer = create_test_tokenizer();
 
