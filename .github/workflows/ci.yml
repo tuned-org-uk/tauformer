@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: "${{ matrix.platform.os }}-latest"
+    strategy:
+      matrix:
+        platform:
+          [
+            { os: "windows", target: "x86_64-pc-windows-msvc" },
+            { os: "ubuntu", target: "x86_64-unknown-linux-gnu" },
+            { os: "macos", target: "aarch64-apple-darwin" },
+          ]
+    env:
+      TZ: "/usr/share/zoneinfo/your/location"
+    steps:
+      # Clean up disk space BEFORE checkout to maximize available space
+      - name: Free Disk Space (Ubuntu)
+        if: matrix.platform.os == 'ubuntu'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # Remove unnecessary preinstalled software
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free Disk Space (macOS)
+        if: matrix.platform.os == 'macos'
+        run: |
+          df -h
+          sudo rm -rf /Users/runner/Library/Android
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/node_modules
+          brew cleanup
+          df -h
+
+      - name: Free Disk Space (Windows)
+        if: matrix.platform.os == 'windows'
+        run: |
+          # Display disk space before cleanup
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{Name="Used(GB)";Expression={[math]::Round($_.Used/1GB,2)}}, @{Name="Free(GB)";Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Total(GB)";Expression={[math]::Round(($_.Used+$_.Free)/1GB,2)}} | Format-Table
+
+          # Remove hosted tool cache
+          Write-Host "Removing hostedtoolcache..."
+          Remove-Item -Path "C:\hostedtoolcache\windows\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # Remove Android SDK
+          if ($env:ANDROID_SDK_ROOT) {
+            Write-Host "Removing Android SDK from $env:ANDROID_SDK_ROOT..."
+            Remove-Item -Path "$env:ANDROID_SDK_ROOT" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # Remove additional large packages
+          Write-Host "Removing additional unused packages..."
+          Remove-Item -Path "C:\Program Files\dotnet" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Program Files (x86)\Microsoft Visual Studio\2019" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\ProgramData\chocolatey" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # Display disk space after cleanup
+          Write-Host "`nDisk space after cleanup:"
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{Name="Used(GB)";Expression={[math]::Round($_.Used/1GB,2)}}, @{Name="Free(GB)";Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Total(GB)";Expression={[math]::Round(($_.Used+$_.Free)/1GB,2)}} | Format-Table
+        shell: powershell
+
+      - uses: actions/checkout@v4
+
+      - name: Setup Protobuf
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc
+        if: matrix.platform.os == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ matrix.platform.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-${{ matrix.platform.target }}-
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache target build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./target/*/incremental/
+            ./target/*/deps/
+            ./target/*/.fingerprint/
+          key: ${{ runner.os }}-target-${{ matrix.platform.target }}-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ matrix.platform.target }}-${{ hashFiles('**/Cargo.toml') }}-
+            ${{ runner.os }}-target-${{ matrix.platform.target }}-
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.platform.target }}
+          profile: minimal
+          default: true
+
+      - name: Verify Protobuf installation
+        run: protoc --version
+
+      - name: Build with all features
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --all-features --target ${{ matrix.platform.target }}
+
+      # Clean up intermediate build artifacts
+      - name: Clean build cache
+        if: matrix.platform.os == 'ubuntu' || matrix.platform.os == 'macos'
+        run: |
+          cargo clean -p genegraph-storage
+          df -h
+
+      - name: Clean build cache (Windows)
+        if: matrix.platform.os == 'windows'
+        run: |
+          cargo clean -p genegraph-storage
+        shell: powershell
+
+      - name: Build without features
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --target ${{ matrix.platform.target }}
+
+      - name: Run tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features
+
+      - name: Run clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-features -- -D warnings
