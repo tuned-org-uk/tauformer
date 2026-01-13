@@ -58,7 +58,7 @@ impl<B: Backend> TauModeAttention<B> {
 
         assert_eq!(nembd % nhead, 0, "nembd must be divisible by nhead");
         assert!(
-            nkv_head <= nhead && nhead % nkv_head == 0,
+            nkv_head <= nhead && nhead.is_multiple_of(nkv_head),
             "Invalid MQA config"
         );
 

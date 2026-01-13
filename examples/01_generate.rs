@@ -34,7 +34,6 @@ fn main() -> anyhow::Result<()> {
 
     if mode == "tau" {
         let manifold_parquet = std::path::Path::new("./domain_manifold/manifold.parquet");
-        pretraining::ensure_domain_manifold_exists(manifold_parquet)?; // keep your check
 
         let domain = pretraining::parquet::load_domain_manifold(manifold_parquet)?;
         let head_dim = cfg.n_embd / cfg.n_head;

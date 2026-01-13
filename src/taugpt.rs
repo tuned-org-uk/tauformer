@@ -115,8 +115,7 @@ impl<B: Backend> TauBlock<B> {
         // Prenorm + residual
         let x = x.clone() + self.attn.forward(rms_norm(x.clone(), 1e-6), cos_sin);
         // Prenorm + residual
-        let x = x.clone() + self.mlp.forward(rms_norm(x, 1e-6));
-        x
+        x.clone() + self.mlp.forward(rms_norm(x, 1e-6))
     }
 
     pub fn forward_decode(
@@ -134,8 +133,7 @@ impl<B: Backend> TauBlock<B> {
             + self
                 .attn
                 .forward_decode(rms_norm(x_step.clone(), 1e-6), cos_sin_step, cache_layer);
-        let x = x.clone() + self.mlp.forward(rms_norm(x, 1e-6));
-        x
+        x.clone() + self.mlp.forward(rms_norm(x, 1e-6))
     }
 }
 
@@ -204,7 +202,7 @@ impl<B: Backend> TauGptModel<B> {
             wte,
             // Each layer shares the same manifold Laplacian + tau selection policy.
             blocks: (0..cfg.n_layer)
-                .map(|i| TauBlock::new_with_sparse_laplacian(cfg, i, device, &laplacian, tau_mode))
+                .map(|i| TauBlock::new_with_sparse_laplacian(cfg, i, device, laplacian, tau_mode))
                 .collect::<Vec<_>>(),
             lnf,
             lmhead,

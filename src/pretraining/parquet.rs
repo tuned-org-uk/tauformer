@@ -13,7 +13,6 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use anyhow::{Context, Result};
-use burn::prelude::*;
 use burn::tensor::{Tensor, backend::Backend};
 use serde::Deserialize;
 use sprs::{CsMat, TriMat};
@@ -279,7 +278,7 @@ fn get_u64_scalar(batch: &RecordBatch, col_name: &str) -> Result<u64> {
         .column_by_name(col_name)
         .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
         .with_context(|| format!("{} column missing or wrong type", col_name))?;
-    anyhow::ensure!(col.len() > 0, "{} column is empty", col_name);
+    anyhow::ensure!(!col.is_empty(), "{} column is empty", col_name);
     Ok(col.value(0))
 }
 

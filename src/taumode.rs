@@ -204,12 +204,7 @@ use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 const TAU_FLOOR: f32 = 1e-10;
 
 fn select_tau_from_vector(x: &[f32], mode: ManifoldTauMode) -> f32 {
-    let mut v: Vec<f32> = x
-        .iter()
-        .copied()
-        .map(|a| a)
-        .filter(|a| a.is_finite())
-        .collect();
+    let mut v: Vec<f32> = x.iter().copied().filter(|a| a.is_finite()).collect();
     if v.is_empty() {
         return TAU_FLOOR;
     }
@@ -262,7 +257,7 @@ fn taumode_bounded_csr(x: &[f32], l: &CsMat<f32>, tau: f32, eps: f32) -> f32 {
         0.0
     };
     let tau = tau.max(eps);
-    (e_raw / (e_raw + tau)) as f32
+    e_raw / (e_raw + tau)
 }
 
 /// CPU-parallel sparse lambdas from heads.

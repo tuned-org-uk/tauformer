@@ -178,9 +178,9 @@ fn task_kv_associative_recall() {
     let mut correct = 0usize;
 
     // helper: sample a key in [1..16)
-    let mut sample_key = |st: &mut u32| -> i64 { (1 + ((lcg_u32(st) as usize) % 15)) as i64 };
+    let sample_key = |st: &mut u32| -> i64 { (1 + ((lcg_u32(st) as usize) % 15)) as i64 };
     // helper: sample a value in [16..48)
-    let mut sample_val = |st: &mut u32| -> i64 { (16 + ((lcg_u32(st) as usize) % 32)) as i64 };
+    let sample_val = |st: &mut u32| -> i64 { (16 + ((lcg_u32(st) as usize) % 32)) as i64 };
 
     for _ in 0..trials {
         // Build UNIQUE keys to make the mapping deterministic.

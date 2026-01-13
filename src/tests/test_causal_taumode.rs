@@ -10,13 +10,13 @@
 //! TauModeAttention tests load a manifold.parquet file (if available) or
 //! fall back to a synthetic chain Laplacian for testing.
 
-use burn::tensor::{Int, Tensor};
-use log::{debug, info};
+use burn::tensor::Tensor;
+use log::info;
 
 use crate::{
     backend::AutoBackend,
-    config::NanoChatConfig,
     causalattention::CausalSelfAttention,
+    config::NanoChatConfig,
     pretraining::{DomainManifold, load_domain_manifold},
     tauattention::{TauCacheLayer, TauModeAttention},
 };

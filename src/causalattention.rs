@@ -33,6 +33,7 @@ pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor
     let rms = (ms + eps).sqrt();
 
     // broadcast back to input shape
+    #[allow(clippy::clone_on_copy)]
     let mut bshape = dims.clone();
     bshape[last] = 1;
     let rms_b = rms.reshape(bshape).expand(dims);
@@ -67,7 +68,7 @@ impl<B: Backend> CausalSelfAttention<B> {
 
         assert_eq!(n_embd % n_head, 0, "n_embd must be divisible by n_head");
         assert!(
-            n_kv_head <= n_head && n_head % n_kv_head == 0,
+            n_kv_head <= n_head && n_head.is_multiple_of(n_kv_head),
             "Invalid MQA config"
         );
 

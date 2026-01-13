@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Domain manifold (GraphLaplacian) management for Tauformer.
 //!
 //! The manifold is "acquired knowledge": trained offline on domain embeddings,
@@ -26,20 +27,6 @@ impl DomainManifold {
         self.matrix.rows()
     }
 }
-
-/// Save the domain manifold Laplacian to a parquet file.
-///
-/// `name_id` is the base filename (e.g., "manifold" → "manifold.parquet").
-// pub fn save_domain_manifold(
-//     manifold: &DomainManifold,
-//     dir: impl AsRef<Path>,
-//     name_id: &str,
-// ) -> Result<()> {
-//     std::fs::create_dir_all(dir.as_ref()).context("Failed to create manifold directory")?;
-
-//     parquet::save_sparse_matrix(&manifold.matrix, dir.as_ref(), name_id)
-//         .context("Failed to save GraphLaplacian to parquet")
-// }
 
 /// Load the domain manifold Laplacian from a parquet file.
 ///
@@ -85,7 +72,7 @@ impl Default for TauModeRuntime {
 /// E_raw = (x^T L x) / (x^T x + eps)
 /// E_bounded = E_raw / (E_raw + tau)
 pub fn compute_taumode(x: &[f32], gl: &CsMat<f32>, cfg: TauModeRuntime) -> f32 {
-    let l: &CsMat<f32> = &gl;
+    let l: &CsMat<f32> = gl;
 
     debug_assert_eq!(l.rows(), l.cols());
     debug_assert_eq!(l.rows(), x.len());
@@ -114,11 +101,6 @@ pub fn compute_taumode(x: &[f32], gl: &CsMat<f32>, cfg: TauModeRuntime) -> f32 {
     };
     let tau = cfg.tau.max(cfg.eps);
     e_raw / (e_raw + tau)
-}
-
-pub fn ensure_domain_manifold_exists(path: impl AsRef<Path>) -> anyhow::Result<()> {
-    // if !path.exists() { build + write parquet }
-    todo!()
 }
 
 /// Convenience conversion (Burn tensors often yield f32).
