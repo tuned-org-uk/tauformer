@@ -662,6 +662,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-cpu"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4807930d243f1aa9dde99db372af56ac532cc6635fd3187156aee375fbadc07"
+dependencies = [
+ "burn-cubecl",
+ "burn-fusion",
+ "burn-tensor",
+ "bytemuck",
+ "cubecl",
+ "derive-new",
+ "half",
+ "log",
+]
+
+[[package]]
 name = "burn-cubecl"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3011,7 +3027,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5085,15 +5101,15 @@ dependencies = [
 
 [[package]]
 name = "tauformer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
  "arrow",
  "arrowspace",
  "burn",
+ "burn-cpu",
  "burn-cuda",
- "burn-ndarray",
  "burn-wgpu",
  "criterion",
  "env_logger",

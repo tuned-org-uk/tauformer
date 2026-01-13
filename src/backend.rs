@@ -9,8 +9,9 @@ pub type AutoBackend = burn_cuda::Cuda<f32>;
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
 pub type AutoBackend = burn_wgpu::Wgpu<f32, i32>;
 
+// New LLVM-powered declaration
 #[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "wgpu"))))]
-pub type AutoBackend = burn_ndarray::NdArray<f32>;
+pub type AutoBackend = burn_cpu::Cpu;
 
 /// Get the best available device
 pub fn get_device() -> <AutoBackend as Backend>::Device {

@@ -19,7 +19,7 @@ use burn::tensor::backend::Backend;
 
 use crate::taumode::{TauModeConfig, causal_softmax_over_keys, taumode_distance_logits};
 
-type B = burn_ndarray::NdArray<f32>;
+type B = burn_cpu::Cpu<f32>;
 type Dev = <B as Backend>::Device;
 
 fn lcg_u32(state: &mut u32) -> u32 {

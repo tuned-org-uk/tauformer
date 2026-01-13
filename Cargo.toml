@@ -1,6 +1,6 @@
 [package]
 name = "tauformer"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "A Transformer Architecture using arrowspace's taumode"
 authors = ["Lorenzo <tunedconsulting@gmail.com>"]
@@ -26,7 +26,7 @@ exclude = [
 [dependencies]
 # Burn with default CPU + optional GPU backends
 burn = { version = "0.19.1", default-features = false, features = ["std", "train"] }
-burn-ndarray = { version = "0.19.1", optional = true }
+burn-cpu = { version = "0.19.1", optional = true }
 burn-wgpu = { version = "0.19.1", optional = true }
 burn-cuda = { version = "0.19.1", optional = true }
 arrowspace = { version = "0.24.6", features = ["storage"] }
@@ -62,7 +62,7 @@ criterion = "0.5"
 
 [features]
 default = ["cpu"]
-cpu = ["burn-ndarray", "ndarray"]
+cpu = ["burn-cpu"]
 wgpu = ["burn-wgpu"]
 cuda = ["burn-cuda"]
 

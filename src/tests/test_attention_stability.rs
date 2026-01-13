@@ -12,7 +12,7 @@ use crate::causalattention::GptModel;
 use crate::config::NanoChatConfig;
 use crate::taumode::{TauModeConfig, causal_softmax_over_keys, taumode_distance_logits};
 
-type B = burn_ndarray::NdArray<f32>;
+type B = burn_cpu::Cpu<f32>;
 type Dev = <B as Backend>::Device;
 
 fn assert_all_finite(name: &str, xs: &[f32]) {

@@ -438,11 +438,10 @@ fn test_numerical_stability() {
         dropout: 0.0,
     };
 
-    let model = GptModel::<burn_ndarray::NdArray>::new(&cfg, &device);
+    let model = GptModel::<burn_cpu::Cpu>::new(&cfg, &device);
 
     // Use SMALL input
-    let input: Tensor<burn_ndarray::NdArray, 2, Int> =
-        Tensor::arange(0..4, &device).reshape([1, 4]);
+    let input: Tensor<burn_cpu::Cpu, 2, Int> = Tensor::arange(0..4, &device).reshape([1, 4]);
     debug!("input {:?}", input);
 
     let logits = model.forward_no_softcap(input);
