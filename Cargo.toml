@@ -33,7 +33,7 @@ arrowspace = { version = "0.24.6", features = ["storage"] }
 
 # Core dependencies
 #bincode = "2.0.0"
-ndarray = { version = "0.16.1", optional = true }
+ndarray = { version = "0.17.2", optional = true }
 #image = "0.25"
 #imageproc = "0.25"
 #ab_glyph = "0.2"
